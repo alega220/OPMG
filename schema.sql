@@ -185,11 +185,16 @@ begin
       auth.uid(), actor_email);
     return new;
   elsif (tg_op = 'DELETE') then
-    insert into public.rack_events (rack_id, event_type, detail, performed_by, performed_by_email)
-    values (old.rack_id, 'device_removed',
-      old.model || coalesce(' (SN '||nullif(old.serial_number,'')||')', '') || ' — ' || old.actual_kw || ' kW (U' || old.start_u ||
-      case when old.size_u>1 then '-'||(old.start_u+old.size_u-1) else '' end || ')',
-      auth.uid(), actor_email);
+    -- only log if the rack itself still exists — during a cascading
+    -- site/rack delete, the rack row may already be gone by the time
+    -- this fires, which would otherwise violate the FK on rack_events
+    if exists (select 1 from public.racks where id = old.rack_id) then
+      insert into public.rack_events (rack_id, event_type, detail, performed_by, performed_by_email)
+      values (old.rack_id, 'device_removed',
+        old.model || coalesce(' (SN '||nullif(old.serial_number,'')||')', '') || ' — ' || old.actual_kw || ' kW (U' || old.start_u ||
+        case when old.size_u>1 then '-'||(old.start_u+old.size_u-1) else '' end || ')',
+        auth.uid(), actor_email);
+    end if;
     return old;
   end if;
   return null;
