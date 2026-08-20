@@ -44,21 +44,39 @@ Opening `index.html` in a browser is enough to try the demo.
 6. **Open the app and create your first account** via the "Create
    account" tab on the login screen. Every new sign-up defaults to
    the `technician` role.
-7. **Promote yourself to manager.** In Supabase: **Table Editor →
+7. **Promote yourself to admin.** In Supabase: **Table Editor →
    profiles**, find your row, change `role` from `technician` to
-   `manager`, save.
-8. **Seed initial data.** Sign back in — as a manager on an empty
-   project you'll see a **"Seed demo data"** button on the dashboard.
-   Click it once to populate the 4 sample sites (B90, A12, C77, D40)
-   with racks and devices. From then on, use **+ Add device** /
-   the remove (×) button in the rack view to manage real inventory,
-   and edit a rack's **max power** from its detail view.
+   `admin`, save. (Admin is a superset of manager — see the roles
+   table below.)
+8. **Seed initial data.** Sign back in — as a manager/admin on an
+   empty project you'll see a **"Seed demo data"** button on the
+   dashboard. Click it once to populate the 4 sample sites (B90, A12,
+   C77, D40) with racks and devices. From then on, use **+ Add site**,
+   **+ Add device** / the remove (×) button in the rack view, and
+   **Remove site** to manage real inventory, and edit a rack's
+   **max power** from its detail view. Every add/remove and capacity
+   change is logged automatically — see it via the **History** button
+   inside a rack's detail view.
 
 To add teammates: they sign up from the login screen (defaults to
-technician — read-only), and a manager promotes them to `manager` in
-the `profiles` table the same way, if needed. There's no separate
-admin UI for this yet — it's a two-minute job in the Supabase Table
-Editor.
+technician — read-only), and an admin promotes them to `manager` or
+`admin` in the `profiles` table the same way, if needed. There's no
+separate admin UI for this yet — it's a two-minute job in the
+Supabase Table Editor.
+
+### Upgrading an existing project
+
+If you already ran an earlier version of `schema.sql` (before the
+`admin` role existed), re-run the whole file — it's safe to re-run,
+every statement uses `create or replace` / `drop ... if exists` first.
+The one manual step: Postgres won't let a `create table if not
+exists` widen an existing `check` constraint, so run this once first:
+```sql
+alter table profiles drop constraint profiles_role_check;
+alter table profiles add constraint profiles_role_check
+  check (role in ('manager','technician','admin'));
+```
+Then run the rest of `schema.sql` as normal.
 
 ---
 
@@ -108,15 +126,47 @@ facility-ops/
 
 ## Roles, in short
 
-| Action | Manager | Technician |
-|---|---|---|
-| View sites, racks, devices, analysis | ✅ | ✅ |
-| Add a device | ✅ | ❌ |
-| Remove a device | ✅ | ❌ |
-| Edit a rack's max power | ✅ | ❌ |
-| Seed demo data (empty project only) | ✅ | ❌ |
+| Action | Technician | Manager | Admin |
+|---|---|---|---|
+| View sites, racks, devices, analysis, history | ✅ | ✅ | ✅ |
+| Add a device | ❌ | ✅ | ✅ |
+| Remove a device | ❌ | ✅ | ✅ |
+| Edit a rack's max power | ❌ | ✅ | ✅ |
+| Add a site (configure racks + rows) | ❌ | ✅ | ✅ |
+| Remove a site | ❌ | ❌ | ✅ |
+| Seed demo data (empty project only) | ❌ | ✅ | ✅ |
 
-Permissions are enforced twice: the UI hides the controls for
-technicians, and the database (`schema.sql`'s RLS policies) rejects
-the write even if someone calls the API directly. Read access is open
-to any signed-in user; there's no anonymous access in live mode.
+Admin is a superset of manager, plus the one thing managers can't do:
+delete a site. Permissions are enforced twice: the UI hides the
+controls for roles that shouldn't see them, and the database
+(`schema.sql`'s RLS policies) rejects the write even if someone calls
+the API directly. Read access is open to any signed-in user; there's
+no anonymous access in live mode.
+
+## What's new since the last version
+
+- **Add site** (managers + admins) requires configuring the site up
+  front: name, location, tier, PUE, **number of racks**, **number of
+  rows**, and **maximum power per rack** — the app lays racks out
+  into rows (Row A, Row B, …) automatically from those numbers and
+  applies the power ceiling to every rack it creates.
+- **Edit site** (managers + admins): an "edit" link next to the site
+  name in the site view lets you update name, location, tier, and PUE
+  at any time. Rack count/rows are structural and set only at
+  creation; individual rack power can still be changed per-rack.
+- **Remove site** (admins only): deletes the site and cascades to all
+  its racks and devices.
+- **Rack view, redesigned again, more thoroughly:** the elevation
+  (left) now has a U-number gutter with 5U rhythm marks like a real
+  elevation chart, two-line labels for multi-U devices (model + U
+  range + kW), and a power-density color legend. The inventory table
+  (right) now shows a color swatch per row matching its elevation
+  block, a badge-styled U column, right-aligned kW figures, and
+  avatar-initial chips for the authorized person — considerably
+  easier to scan than a plain table.
+- **History button** inside every rack's detail view — shows every
+  device added/removed and every capacity change **from the last 6
+  months**, who did it, and when. In live mode this is captured
+  automatically by database triggers (`rack_events` table in
+  `schema.sql`), so it
+  can't be bypassed by going around the UI.

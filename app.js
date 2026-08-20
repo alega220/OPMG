@@ -143,9 +143,15 @@ const state = {
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
   editingCapacity:false, capacityError:null,
+  addSiteError:null,
+  editSiteId:null, editSiteError:null,
+  historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
 };
-function isManager(){ return state.role === 'manager'; }
+// managers AND admins can add/remove devices, edit rack capacity, add sites
+function isManager(){ return state.role === 'manager' || state.role === 'admin'; }
+// ONLY admins can remove a site
+function isAdmin(){ return state.role === 'admin'; }
 
 /* ---------------------------------------------------------------
    DATA LAYER — demo vs live
@@ -215,6 +221,8 @@ async function addDevice({ siteId, rackId, model, sizeU, actualKw, datasheetKw, 
     rack.devices.push({ id:data.id, startU:freeStart, sizeU, model, actualKw, datasheetKw, authorizedPerson });
   } else {
     rack.devices.push({ id:`demo-${Date.now()}`, startU:freeStart, sizeU, model, actualKw, datasheetKw, authorizedPerson });
+    const uLabel = sizeU>1 ? `U${freeStart}-${freeStart+sizeU-1}` : `U${freeStart}`;
+    pushDemoHistory(rack, 'device_added', `${model} — ${actualKw.toFixed(2)} kW (${uLabel})`);
   }
   recomputeRack(rack); recomputeSite(site);
   return { ok:true, rack, startU:freeStart };
@@ -223,9 +231,13 @@ async function addDevice({ siteId, rackId, model, sizeU, actualKw, datasheetKw, 
 async function removeDevice(siteId, rackId, deviceId){
   const site = SITES.find(s=>s.id===siteId);
   const rack = site.racks.find(r=>r.id===rackId);
+  const dev = rack.devices.find(d=>d.id===deviceId);
   if(LIVE){
     const { error } = await sb.from('devices').delete().eq('id', deviceId);
     if(error) return { error: error.message };
+  } else if(dev){
+    const uLabel = dev.sizeU>1 ? `U${dev.startU}-${dev.startU+dev.sizeU-1}` : `U${dev.startU}`;
+    pushDemoHistory(rack, 'device_removed', `${dev.model} — ${dev.actualKw.toFixed(2)} kW (${uLabel})`);
   }
   rack.devices = rack.devices.filter(d=>d.id!==deviceId);
   recomputeRack(rack); recomputeSite(site);
@@ -235,13 +247,90 @@ async function removeDevice(siteId, rackId, deviceId){
 async function updateRackCapacity(siteId, rackId, newCapacityKw){
   const site = SITES.find(s=>s.id===siteId);
   const rack = site.racks.find(r=>r.id===rackId);
+  const oldCapacityKw = rack.capacityKw;
   if(LIVE){
     const { error } = await sb.from('racks').update({ capacity_kw: newCapacityKw }).eq('id', rackId);
     if(error) return { error: error.message };
+  } else {
+    pushDemoHistory(rack, 'capacity_changed', `${oldCapacityKw} kW -> ${newCapacityKw} kW`);
   }
   rack.capacityKw = newCapacityKw;
   recomputeSite(site);
   return { ok:true };
+}
+
+function slugify(name){
+  const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'site';
+  let id = base, n = 1;
+  while(SITES.some(s=>s.id===id)){ id = `${base}-${++n}`; }
+  return id;
+}
+
+async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKw }){
+  const id = slugify(name);
+  const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
+  const rackDefs = [];
+  for(let i=1;i<=rackCount;i++){
+    const row = String.fromCharCode(65 + Math.floor((i-1)/racksPerRow));
+    rackDefs.push({ id:`${id.toUpperCase()}-R${String(i).padStart(3,'0')}`, row, capacityKw:defaultCapacityKw });
+  }
+
+  if(LIVE){
+    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue });
+    if(e1) return { error: e1.message };
+    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:id, row_label:r.row, capacity_kw:r.capacityKw }));
+    for(let i=0;i<rackRows.length;i+=500){
+      const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
+      if(e2) return { error: e2.message };
+    }
+  }
+
+  const racks = rackDefs.map(r=>({ ...r, devices:[], history:[] }));
+  racks.forEach(recomputeRack);
+  const site = { id, name, location, tier, pue, racks };
+  recomputeSite(site);
+  SITES.push(site);
+  return { ok:true, site };
+}
+
+async function removeSite(siteId){
+  if(LIVE){
+    const { error } = await sb.from('sites').delete().eq('id', siteId);
+    if(error) return { error: error.message };
+  }
+  SITES = SITES.filter(s=>s.id!==siteId);
+  return { ok:true };
+}
+
+async function updateSiteInfo(siteId, { name, location, tier, pue }){
+  const site = SITES.find(s=>s.id===siteId);
+  if(LIVE){
+    const { error } = await sb.from('sites').update({ name, location, tier, pue }).eq('id', siteId);
+    if(error) return { error: error.message };
+  }
+  site.name = name; site.location = location; site.tier = tier; site.pue = pue;
+  recomputeSite(site);
+  return { ok:true };
+}
+
+function pushDemoHistory(rack, eventType, detail){
+  if(!rack.history) rack.history = [];
+  rack.history.unshift({ eventType, detail, actor: state.user ? state.user.email : `Demo ${state.role}`, createdAt: new Date().toISOString() });
+}
+
+const HISTORY_WINDOW_DAYS = 182; // ~6 months
+
+async function loadRackHistory(rackId){
+  const sinceIso = new Date(Date.now() - HISTORY_WINDOW_DAYS*24*60*60*1000).toISOString();
+  if(!LIVE){
+    const site = SITES.find(s=>s.racks.some(r=>r.id===rackId));
+    const rack = site.racks.find(r=>r.id===rackId);
+    const events = (rack.history || []).filter(e=>e.createdAt >= sinceIso);
+    return { ok:true, events };
+  }
+  const { data, error } = await sb.from('rack_events').select('*').eq('rack_id', rackId).gte('created_at', sinceIso).order('created_at', { ascending:false }).limit(500);
+  if(error) return { error: error.message };
+  return { ok:true, events: (data||[]).map(e=>({ eventType:e.event_type, detail:e.detail, actor:e.performed_by_email||'Unknown', createdAt:e.created_at })) };
 }
 
 /* ---------------------------------------------------------------
@@ -335,7 +424,10 @@ function renderDashboard(){
   }
 
   return `
-    <div class="h1">Colocation facility operations</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+      <div class="h1">Colocation facility operations</div>
+      ${isManager() ? `<button class="btn btn-primary" id="openAddSite">+ Add site</button>` : ''}
+    </div>
     <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racks} racks · portfolio utilization ${fmtPct(pct)}</div>
 
     <div class="card kpirow">
@@ -366,7 +458,10 @@ function renderDashboard(){
             <div><div class="sitename">${s.name}</div><div class="siteloc">${esc(s.location)}</div></div>
             <span class="badge ${statusColor(s.utilizationPct)}">${statusLabel(s.utilizationPct)}</span>
           </div>
-          ${isManager() ? `<div style="margin-bottom:14px;"><button class="btn btn-primary btn-sm" data-add-device="${s.id}">+ Add device</button></div>` : ''}
+          <div style="display:flex;gap:8px;margin-bottom:14px;">
+            ${isManager() ? `<button class="btn btn-primary btn-sm" data-add-device="${s.id}">+ Add device</button>` : ''}
+            ${isAdmin() ? `<button class="btn btn-sm btn-danger" data-remove-site="${s.id}" data-remove-site-name="${esc(s.name)}">Remove site</button>` : ''}
+          </div>
           <div class="gaugewrap">
             ${gaugeSvg(s.utilizationPct,62)}
             <div class="statgrid2">
@@ -459,11 +554,12 @@ function renderSite(site){
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
       <div>
-        <div class="sitename" style="font-size:24px;">${site.name}</div>
+        <div class="sitename" style="font-size:24px;">${site.name} ${isManager() ? `<button class="editlink" id="openEditSite" style="font-size:12px;">edit</button>` : ''}</div>
         <div class="siteloc" style="margin-top:3px;">${esc(site.location||'')} · ${site.tier||''} · ${site.racks.length} racks</div>
       </div>
-      <div style="display:flex;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:10px;">
         ${isManager() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
+        ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
       </div>
     </div>
@@ -498,23 +594,52 @@ function renderSite(site){
 /* ---------------------------------------------------------------
    RACK MODAL (elevation + inventory + capacity setup + remove)
 --------------------------------------------------------------- */
+function initials(name){
+  const clean = String(name).split('—')[0].trim();
+  const parts = clean.split(/\s+/).filter(Boolean).map(p=>p.replace(/[^A-Za-z]/g,'')).filter(Boolean);
+  return ((parts[0]||'')[0]||'') .toUpperCase() + ((parts[1]||'')[0]||'').toUpperCase();
+}
+
 function renderRackModal(rack, site){
   const pct = rack.capacityKw>0 ? rack.totalActualKw/rack.capacityKw : 0;
   const view = state.rackFace || 'front';
 
   let elevationHtml = '';
   if(view==='front'){
-    let u=42; const rows=[];
+    let u=42; const rows=[]; const gutter=[];
     while(u>=1){
       const dev = rack.devices.find(d=>u>=d.startU && u<=d.startU+d.sizeU-1);
+      const mark5 = (u%5===0) ? ' mark5' : '';
       if(dev && u===dev.startU+dev.sizeU-1){
         const h = dev.sizeU*11;
         const kwPerU = dev.actualKw/dev.sizeU;
-        rows.push(`<div class="u-slot" style="height:${h}px;background:${densityColor(kwPerU)};" title="${esc(dev.model)} · U${dev.startU}-${dev.startU+dev.sizeU-1} · ${dev.actualKw.toFixed(2)} kW">${esc(dev.model)}</div>`);
+        const uLabel = dev.sizeU>1 ? `U${dev.startU}-${dev.startU+dev.sizeU-1}` : `U${dev.startU}`;
+        const title = `${esc(dev.model)} · ${uLabel} · ${dev.actualKw.toFixed(2)} kW`;
+        if(dev.sizeU>=2){
+          rows.push(`<div class="u-slot tall" style="height:${h}px;background:${densityColor(kwPerU)};" title="${title}">
+            <span class="u-slot-title">${esc(dev.model)}</span>
+            <span class="u-slot-sub">${uLabel} · ${dev.actualKw.toFixed(2)} kW</span>
+          </div>`);
+        } else {
+          rows.push(`<div class="u-slot" style="height:${h}px;background:${densityColor(kwPerU)};" title="${title}">${esc(dev.model)}</div>`);
+        }
+        gutter.push(`<div class="major${mark5}" style="height:${h}px;">${u}</div>`);
         u -= dev.sizeU;
-      } else { rows.push(`<div class="u-empty"></div>`); u -= 1; }
+      } else {
+        rows.push(`<div class="u-empty${mark5}"></div>`);
+        gutter.push(`<div class="${mark5.trim()}">${u}</div>`);
+        u -= 1;
+      }
     }
-    elevationHtml = `<div class="elevation">${rows.join('')}</div>`;
+    elevationHtml = `
+      <div class="elev-caption"><span>${rack.id} · 42U</span><span>top = U42</span></div>
+      <div class="elevation-wrap">
+        <div class="u-gutter">${gutter.join('')}</div>
+        <div class="elevation">${rows.join('')}</div>
+      </div>
+      <div class="density-legend">
+        <span>Power density</span><div class="density-bar"></div><span>Low → High (kW/U)</span>
+      </div>`;
   } else {
     const pduA = rack.totalActualKw/2 * (0.92 + (hashStr(rack.id)%17)/100);
     const pduB = rack.totalActualKw - pduA;
@@ -546,11 +671,11 @@ function renderRackModal(rack, site){
 
   return `
   <div class="overlay" id="overlay">
-    <div class="modal">
+    <div class="modal" style="max-width:1000px;">
       <div class="modal-top">
         <div>
           <div class="sitename" style="font-size:19px;">${rack.id}</div>
-          <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')}</div>
+          <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')} · Row ${esc(rack.row||'—')}</div>
         </div>
         <button class="modal-close" id="closeModal">&times;</button>
       </div>
@@ -562,41 +687,49 @@ function renderRackModal(rack, site){
         <div><div class="stat-label">Utilization</div><span class="badge ${statusColor(pct)}">${fmtPct(pct)} · ${statusLabel(pct)}</span></div>
       </div>
 
-      <div style="display:flex;gap:24px;flex-wrap:wrap;">
-        <div>
-          <div class="viewtoggle">
-            <button data-face="front" class="${view==='front'?'active':''}">Front</button>
-            <button data-face="rear" class="${view==='rear'?'active':''}">Rear</button>
+      <div class="rackview-grid">
+        <div class="rackview-left">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+            <div class="viewtoggle" style="margin-bottom:0;">
+              <button data-face="front" class="${view==='front'?'active':''}">Front</button>
+              <button data-face="rear" class="${view==='rear'?'active':''}">Rear</button>
+            </div>
+            <button class="btn btn-sm" id="openHistory" title="View change history">History</button>
           </div>
           ${elevationHtml}
         </div>
 
-        <div style="flex:1;min-width:280px;">
+        <div class="rackview-right">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <div class="stat-label" style="margin:0;">Inventory</div>
             ${isManager() ? `<button class="btn btn-primary btn-sm" data-add-device-rack="${rack.id}" data-add-device-site="${site.id}">+ Add device</button>` : ''}
           </div>
-          <div style="max-height:462px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
+          <div style="max-height:500px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
             <table class="inv">
-              <thead><tr><th>U</th><th>Device model</th><th>Actual</th><th>Datasheet</th><th>Authorized person</th>${isManager()?'<th></th>':''}</tr></thead>
+              <thead><tr>
+                <th class="num">U</th><th>Device</th><th class="num">Actual</th><th class="num">Datasheet</th><th>Authorized person</th>${isManager()?'<th class="rm-col"></th>':''}
+              </tr></thead>
               <tbody>
-                ${[...rack.devices].sort((a,b)=>b.startU-a.startU).map(d=>`
+                ${[...rack.devices].sort((a,b)=>b.startU-a.startU).map(d=>{
+                  const swatch = densityColor(d.actualKw/d.sizeU);
+                  const uLabel = d.sizeU>1 ? `${d.startU}–${d.startU+d.sizeU-1}` : d.startU;
+                  return `
                   <tr>
-                    <td class="mono faint">${d.sizeU>1 ? `${d.startU}-${d.startU+d.sizeU-1}` : d.startU}</td>
-                    <td>${esc(d.model)}</td>
-                    <td class="mono" style="color:var(--purple-dark);">${d.actualKw.toFixed(2)}</td>
-                    <td class="mono faint">${d.datasheetKw.toFixed(2)}</td>
-                    <td class="faint" style="font-size:11.5px;">${esc(d.authorizedPerson)}</td>
-                    ${isManager() ? `<td><button class="rm-btn" data-remove-device="${d.id}" data-remove-rack="${rack.id}" data-remove-site="${site.id}" title="Remove device">&times;</button></td>` : ''}
+                    <td class="num"><span class="ubadge">${uLabel}</span></td>
+                    <td><div class="model-cell"><span class="swatch" style="background:${swatch};"></span><span style="font-weight:600;">${esc(d.model)}</span></div></td>
+                    <td class="num" style="color:var(--purple-dark);font-weight:600;">${d.actualKw.toFixed(2)}<span class="faint" style="font-weight:400;font-size:10px;"> kW</span></td>
+                    <td class="num faint">${d.datasheetKw.toFixed(2)}<span style="font-size:10px;"> kW</span></td>
+                    <td><div class="person-cell"><span class="avatar">${esc(initials(d.authorizedPerson))}</span><span class="faint" style="font-size:11.5px;">${esc(d.authorizedPerson)}</span></div></td>
+                    ${isManager() ? `<td class="rm"><button class="rm-btn" data-remove-device="${d.id}" data-remove-rack="${rack.id}" data-remove-site="${site.id}" title="Remove device">&times;</button></td>` : ''}
                   </tr>
-                `).join('')}
+                `;}).join('')}
               </tbody>
               <tfoot>
                 <tr>
                   <td colspan="2" class="faint">Total (${rack.devices.length} devices)</td>
-                  <td class="mono" style="color:var(--purple-dark);">${rack.totalActualKw.toFixed(2)}</td>
-                  <td class="mono">${rack.totalDatasheetKw.toFixed(2)}</td>
-                  <td></td><td></td>
+                  <td class="num" style="color:var(--purple-dark);">${rack.totalActualKw.toFixed(2)}</td>
+                  <td class="num">${rack.totalDatasheetKw.toFixed(2)}</td>
+                  <td></td>${isManager()?'<td></td>':''}
                 </tr>
               </tfoot>
             </table>
@@ -679,6 +812,165 @@ function renderAddDeviceModal(){
           <button type="submit" class="btn btn-primary">Add device</button>
         </div>
       </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
+   ADD SITE MODAL (managers + admins)
+--------------------------------------------------------------- */
+function renderAddSiteModal(){
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">Add site</div>
+          <div class="siteloc" style="margin-top:2px;">Define the rack layout for a new colocation site</div>
+        </div>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+
+      ${state.addSiteError ? `<div class="form-error">${esc(state.addSiteError)}</div>` : ''}
+
+      <form id="addSiteForm">
+        <div class="field">
+          <label>Site name</label>
+          <input id="sName" placeholder="e.g. E55" autocomplete="off"/>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Location</label>
+            <input id="sLocation" placeholder="e.g. Cairo — Bldg 55" autocomplete="off"/>
+          </div>
+          <div class="field">
+            <label>Tier</label>
+            <select id="sTier">
+              <option>Tier I</option><option>Tier II</option><option selected>Tier III</option><option>Tier IV</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Number of racks</label>
+            <input id="sRackCount" type="number" min="1" max="2000" step="1" value="40"/>
+          </div>
+          <div class="field">
+            <label>Number of rows</label>
+            <input id="sRowCount" type="number" min="1" max="200" step="1" value="4"/>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Maximum power per rack (kW)</label>
+            <input id="sCapacity" type="number" min="0.5" step="0.5" value="10"/>
+          </div>
+          <div class="field">
+            <label>PUE</label>
+            <input id="sPue" type="number" min="1" step="0.01" value="1.4"/>
+          </div>
+        </div>
+        <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">Applied to every rack at creation — each rack's max power can still be adjusted individually afterward.</div>
+
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;">
+          <button type="button" class="btn" id="cancelAddSite">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create site</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
+   EDIT SITE MODAL (managers + admins) — name/location/tier/PUE
+--------------------------------------------------------------- */
+function renderEditSiteModal(){
+  const site = SITES.find(s=>s.id===state.editSiteId);
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">Edit site — ${esc(site.name)}</div>
+          <div class="siteloc" style="margin-top:2px;">Rack count and layout are set at creation and can't be changed here.</div>
+        </div>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+
+      ${state.editSiteError ? `<div class="form-error">${esc(state.editSiteError)}</div>` : ''}
+
+      <form id="editSiteForm">
+        <div class="field">
+          <label>Site name</label>
+          <input id="eName" value="${esc(site.name)}" autocomplete="off"/>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Location</label>
+            <input id="eLocation" value="${esc(site.location||'')}" autocomplete="off"/>
+          </div>
+          <div class="field">
+            <label>Tier</label>
+            <select id="eTier">
+              ${['Tier I','Tier II','Tier III','Tier IV'].map(t=>`<option ${site.tier===t?'selected':''}>${t}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>PUE</label>
+          <input id="ePue" type="number" min="1" step="0.01" value="${site.pue}"/>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;">
+          <button type="button" class="btn" id="cancelEditSite">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
+   RACK HISTORY MODAL
+--------------------------------------------------------------- */
+const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', capacity_changed:'Capacity' };
+const HISTORY_COLORS = { device_added:'green', device_removed:'red', capacity_changed:'amber' };
+
+function fmtWhen(iso){
+  const d = new Date(iso);
+  if(isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+function renderHistoryModal(rack){
+  const events = state.historyEvents || [];
+  return `
+  <div class="overlay" id="historyOverlay">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">History — ${rack.id}</div>
+          <div class="siteloc" style="margin-top:2px;">Every device add/remove and capacity change, last 6 months</div>
+        </div>
+        <button class="modal-close" id="closeHistory">&times;</button>
+      </div>
+
+      ${state.historyLoading ? `<div class="faint" style="padding:20px 0;text-align:center;">Loading…</div>` :
+        events.length===0 ? `<div class="faint" style="padding:20px 0;text-align:center;">No changes recorded for this rack in the last 6 months.</div>` : `
+        <div class="historylist">
+          ${events.map(ev=>`
+            <div class="historyrow">
+              <span class="badge ${HISTORY_COLORS[ev.eventType]||'green'}" style="min-width:64px;text-align:center;">${HISTORY_LABELS[ev.eventType]||ev.eventType}</span>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;">${esc(ev.detail)}</div>
+                <div class="faint" style="font-size:11px;margin-top:2px;">${esc(ev.actor||'Unknown')} · ${fmtWhen(ev.createdAt)}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `}
     </div>
   </div>`;
 }
@@ -831,6 +1123,7 @@ function renderTopbarMeta(){
     topbarMeta.innerHTML = `
       <span class="demo-switch">Demo mode — viewing as
         <select id="demoRoleSelect">
+          <option value="admin" ${state.role==='admin'?'selected':''}>Admin</option>
           <option value="manager" ${state.role==='manager'?'selected':''}>Manager</option>
           <option value="technician" ${state.role==='technician'?'selected':''}>Technician</option>
         </select>
@@ -846,6 +1139,7 @@ function render(){
   else rootEl.innerHTML = renderSite(SITES.find(s=>s.id===state.siteId));
   attachHandlers();
   renderModal();
+  renderHistoryOverlay();
   updateNavActive();
   if(state.view==='analysis') requestAnimationFrame(drawAnalysisCharts);
 }
@@ -899,6 +1193,8 @@ function renderModal(){
       state.modalType = 'addDevice';
       renderModal();
     });
+    const historyBtn = document.getElementById('openHistory');
+    if(historyBtn) historyBtn.addEventListener('click', ()=> openHistory(rack));
     return;
   }
 
@@ -909,14 +1205,59 @@ function renderModal(){
     document.getElementById('cancelAddDevice').addEventListener('click', closeModal);
     document.getElementById('fSite').addEventListener('change', (e)=>{ state.addDeviceSiteId = e.target.value; state.addDeviceRackId=null; state.addDeviceError=null; renderModal(); });
     document.getElementById('addDeviceForm').addEventListener('submit', handleAddDeviceSubmit);
+    return;
+  }
+
+  if(state.modalType==='addSite'){
+    modalRoot.innerHTML = renderAddSiteModal();
+    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    document.getElementById('cancelAddSite').addEventListener('click', closeModal);
+    document.getElementById('addSiteForm').addEventListener('submit', handleAddSiteSubmit);
+    return;
+  }
+
+  if(state.modalType==='editSite'){
+    modalRoot.innerHTML = renderEditSiteModal();
+    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    document.getElementById('cancelEditSite').addEventListener('click', closeModal);
+    document.getElementById('editSiteForm').addEventListener('submit', handleEditSiteSubmit);
   }
 }
 
 function closeModal(){
   state.modalRack=null; state.modalSiteId=null; state.rackFace='front';
   state.modalType=null; state.addDeviceSiteId=null; state.addDeviceRackId=null; state.addDeviceError=null;
-  state.editingCapacity=false; state.capacityError=null;
+  state.editingCapacity=false; state.capacityError=null; state.addSiteError=null;
+  state.editSiteId=null; state.editSiteError=null;
   renderModal();
+}
+
+/* ---------------------------------------------------------------
+   HISTORY OVERLAY (stacks on top of the rack modal)
+--------------------------------------------------------------- */
+let historyModalRoot;
+async function openHistory(rack){
+  state.historyRack = rack; state.historySiteId = state.modalSiteId;
+  state.historyLoading = true; state.historyEvents = null;
+  renderHistoryOverlay();
+  const res = await loadRackHistory(rack.id);
+  state.historyLoading = false;
+  state.historyEvents = res.ok ? res.events : [];
+  if(res.error) showToast(res.error, true);
+  renderHistoryOverlay();
+}
+function closeHistory(){
+  state.historyRack = null; state.historySiteId = null; state.historyEvents = null; state.historyLoading = false;
+  renderHistoryOverlay();
+}
+function renderHistoryOverlay(){
+  if(!historyModalRoot){ historyModalRoot = document.createElement('div'); document.body.appendChild(historyModalRoot); }
+  if(!state.historyRack){ historyModalRoot.innerHTML=''; return; }
+  historyModalRoot.innerHTML = renderHistoryModal(state.historyRack);
+  document.getElementById('historyOverlay').addEventListener('click', (e)=>{ if(e.target.id==='historyOverlay') closeHistory(); });
+  document.getElementById('closeHistory').addEventListener('click', closeHistory);
 }
 
 async function handleAddDeviceSubmit(e){
@@ -942,6 +1283,48 @@ async function handleAddDeviceSubmit(e){
   closeModal();
   showToast(`${model} added to ${rackId} (U${res.startU}${sizeU>1?'-'+(res.startU+sizeU-1):''})`);
   if(wasRackModal){ state.modalType='rack'; state.modalRack={id:rackId}; state.modalSiteId=siteId; }
+  render();
+}
+
+async function handleAddSiteSubmit(e){
+  e.preventDefault();
+  const name = document.getElementById('sName').value.trim();
+  const location = document.getElementById('sLocation').value.trim();
+  const tier = document.getElementById('sTier').value;
+  const rackCount = parseInt(document.getElementById('sRackCount').value, 10);
+  const rowCount = parseInt(document.getElementById('sRowCount').value, 10);
+  const defaultCapacityKw = parseFloat(document.getElementById('sCapacity').value);
+  const pue = parseFloat(document.getElementById('sPue').value);
+
+  if(!name){ state.addSiteError='Enter a site name.'; renderModal(); return; }
+  if(!Number.isInteger(rackCount) || rackCount<1 || rackCount>2000){ state.addSiteError='Number of racks must be a whole number between 1 and 2000.'; renderModal(); return; }
+  if(!Number.isInteger(rowCount) || rowCount<1 || rowCount>rackCount){ state.addSiteError='Number of rows must be a whole number between 1 and the number of racks.'; renderModal(); return; }
+  if(isNaN(defaultCapacityKw) || defaultCapacityKw<=0){ state.addSiteError='Enter a valid default rack capacity greater than 0.'; renderModal(); return; }
+  if(isNaN(pue) || pue<1){ state.addSiteError='PUE must be 1 or greater.'; renderModal(); return; }
+
+  const res = await createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKw });
+  if(res.error){ state.addSiteError = res.error; renderModal(); return; }
+
+  closeModal();
+  showToast(`${name} created with ${rackCount} racks.`);
+  render();
+}
+
+async function handleEditSiteSubmit(e){
+  e.preventDefault();
+  const name = document.getElementById('eName').value.trim();
+  const location = document.getElementById('eLocation').value.trim();
+  const tier = document.getElementById('eTier').value;
+  const pue = parseFloat(document.getElementById('ePue').value);
+
+  if(!name){ state.editSiteError='Enter a site name.'; renderModal(); return; }
+  if(isNaN(pue) || pue<1){ state.editSiteError='PUE must be 1 or greater.'; renderModal(); return; }
+
+  const res = await updateSiteInfo(state.editSiteId, { name, location, tier, pue });
+  if(res.error){ state.editSiteError = res.error; renderModal(); return; }
+
+  closeModal();
+  showToast(`${name} updated.`);
   render();
 }
 
@@ -971,6 +1354,23 @@ function attachHandlers(){
       state.addDeviceError = null;
       state.modalType = 'addDevice';
       renderModal();
+    });
+  });
+  const openAddSite = document.getElementById('openAddSite');
+  if(openAddSite) openAddSite.addEventListener('click', ()=>{ state.addSiteError=null; state.modalType='addSite'; renderModal(); });
+  const openEditSite = document.getElementById('openEditSite');
+  if(openEditSite) openEditSite.addEventListener('click', ()=>{ state.editSiteId=state.siteId; state.editSiteError=null; state.modalType='editSite'; renderModal(); });
+  rootEl.querySelectorAll('[data-remove-site]').forEach(el=>{
+    el.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const id = el.getAttribute('data-remove-site');
+      const name = el.getAttribute('data-remove-site-name');
+      if(!confirm(`Remove ${name}? This deletes all its racks and devices permanently.`)) return;
+      const res = await removeSite(id);
+      if(res.error){ showToast(res.error, true); return; }
+      showToast(`${name} removed.`);
+      if(state.siteId===id){ state.view='dashboard'; state.siteId=null; }
+      render();
     });
   });
   const seedBtn = document.getElementById('seedBtn');
