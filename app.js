@@ -46,6 +46,12 @@ const SITE_DEFS = [
   {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20]},
 ];
 
+function genSerial(rng, siteId, idx, n){
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for(let i=0;i<8;i++) s += chars[Math.floor(rng()*chars.length)];
+  return `SN-${siteId.toUpperCase()}-${s}`;
+}
 function generateRack(rng, siteId, idx, caps, rowLen){
   const capacityKw = pick(rng, caps);
   const targetUtil = rand(rng, 0.28, 0.97);
@@ -62,11 +68,12 @@ function generateRack(rng, siteId, idx, caps, rowLen){
     }
     const power = rand(rng, t.min, t.max);
     if(curPower + power > capacityKw*1.03) break;
-    devices.push({id:`demo-${siteId}-${idx}-${devices.length}`, startU:curU, sizeU:t.size, model:t.name, actualKw:power, datasheetKw:power*rand(rng,1.25,1.7), authorizedPerson:pick(rng,PEOPLE)});
+    devices.push({id:`demo-${siteId}-${idx}-${devices.length}`, startU:curU, sizeU:t.size, model:t.name, serialNumber:genSerial(rng,siteId,idx,devices.length), actualKw:power, datasheetKw:power*rand(rng,1.25,1.7), authorizedPerson:pick(rng,PEOPLE)});
     curU += t.size; curPower += power;
   }
   const row = String.fromCharCode(65 + Math.floor((idx-1)/rowLen));
-  return { id:`${siteId.toUpperCase()}-R${String(idx).padStart(3,"0")}`, row, capacityKw, devices };
+  const id = `${siteId.toUpperCase()}-R${String(idx).padStart(3,"0")}`;
+  return { id, name:id, row, capacityKw, devices };
 }
 function generateSite(def){
   const rng = mulberry32(hashStr(def.id) ^ 0x9E3779B9);
@@ -143,14 +150,16 @@ const state = {
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
   editingCapacity:false, capacityError:null,
+  editingRackName:false, rackNameError:null,
   addSiteError:null,
   editSiteId:null, editSiteError:null,
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
+  draggingRackId:null,
 };
-// managers AND admins can add/remove devices, edit rack capacity, add sites
+// managers AND admins can add/remove devices, edit rack capacity/name/position, add/remove sites
 function isManager(){ return state.role === 'manager' || state.role === 'admin'; }
-// ONLY admins can remove a site
+// admin currently has no extra powers beyond manager — kept for future use
 function isAdmin(){ return state.role === 'admin'; }
 
 /* ---------------------------------------------------------------
@@ -172,10 +181,10 @@ async function loadData(){
   SITES = (siteRows||[]).map(s=>{
     const racks = (rackRows||[]).filter(r=>r.site_id===s.id).map(r=>{
       const devices = (deviceRows||[]).filter(d=>d.rack_id===r.id).map(d=>({
-        id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model,
+        id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         actualKw:Number(d.actual_kw), datasheetKw:Number(d.datasheet_kw), authorizedPerson:d.authorized_person,
       }));
-      const rack = { id:r.id, row:r.row_label, capacityKw:Number(r.capacity_kw), devices };
+      const rack = { id:r.id, name:r.name||r.id, row:r.row_label, capacityKw:Number(r.capacity_kw), devices };
       recomputeRack(rack);
       return rack;
     });
@@ -192,11 +201,11 @@ async function seedDemoDataToSupabase(){
   const demo = SITE_DEFS.map(generateSite);
   for(const site of demo){
     await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue });
-    const rackRows = site.racks.map(r=>({ id:r.id, site_id:site.id, row_label:r.row, capacity_kw:r.capacityKw }));
+    const rackRows = site.racks.map(r=>({ id:r.id, site_id:site.id, row_label:r.row, name:r.name||r.id, capacity_kw:r.capacityKw }));
     for(let i=0;i<rackRows.length;i+=500) await sb.from('racks').upsert(rackRows.slice(i,i+500));
     let deviceRows = [];
     site.racks.forEach(r=>r.devices.forEach(d=>{
-      deviceRows.push({ rack_id:r.id, start_u:d.startU, size_u:d.sizeU, model:d.model, actual_kw:d.actualKw, datasheet_kw:d.datasheetKw, authorized_person:d.authorizedPerson, created_by: state.user.id });
+      deviceRows.push({ rack_id:r.id, start_u:d.startU, size_u:d.sizeU, model:d.model, serial_number:d.serialNumber||'', actual_kw:d.actualKw, datasheet_kw:d.datasheetKw, authorized_person:d.authorizedPerson, created_by: state.user.id });
     }));
     for(let i=0;i<deviceRows.length;i+=500) await sb.from('devices').insert(deviceRows.slice(i,i+500));
   }
@@ -205,24 +214,24 @@ async function seedDemoDataToSupabase(){
   render();
 }
 
-async function addDevice({ siteId, rackId, model, sizeU, actualKw, datasheetKw, authorizedPerson }){
+async function addDevice({ siteId, rackId, model, sizeU, actualKw, datasheetKw, authorizedPerson, serialNumber }){
   const site = SITES.find(s=>s.id===siteId);
   const rack = site.racks.find(r=>r.id===rackId);
   const freeStart = findFreeSlot(rack, sizeU);
-  if(freeStart===null) return { error: `${rack.id} doesn't have ${sizeU} contiguous U free. Try a smaller size or another rack.` };
+  if(freeStart===null) return { error: `${rack.name||rack.id} doesn't have ${sizeU} contiguous U free. Try a smaller size or another rack.` };
 
   if(LIVE){
     const { data, error } = await sb.from('devices').insert({
-      rack_id: rackId, start_u: freeStart, size_u: sizeU, model,
+      rack_id: rackId, start_u: freeStart, size_u: sizeU, model, serial_number: serialNumber,
       actual_kw: actualKw, datasheet_kw: datasheetKw, authorized_person: authorizedPerson,
       created_by: state.user.id,
     }).select().single();
     if(error) return { error: error.message };
-    rack.devices.push({ id:data.id, startU:freeStart, sizeU, model, actualKw, datasheetKw, authorizedPerson });
+    rack.devices.push({ id:data.id, startU:freeStart, sizeU, model, serialNumber, actualKw, datasheetKw, authorizedPerson });
   } else {
-    rack.devices.push({ id:`demo-${Date.now()}`, startU:freeStart, sizeU, model, actualKw, datasheetKw, authorizedPerson });
+    rack.devices.push({ id:`demo-${Date.now()}`, startU:freeStart, sizeU, model, serialNumber, actualKw, datasheetKw, authorizedPerson });
     const uLabel = sizeU>1 ? `U${freeStart}-${freeStart+sizeU-1}` : `U${freeStart}`;
-    pushDemoHistory(rack, 'device_added', `${model} — ${actualKw.toFixed(2)} kW (${uLabel})`);
+    pushDemoHistory(rack, 'device_added', `${model}${serialNumber?` (SN ${serialNumber})`:''} — ${actualKw.toFixed(2)} kW (${uLabel})`);
   }
   recomputeRack(rack); recomputeSite(site);
   return { ok:true, rack, startU:freeStart };
@@ -237,7 +246,7 @@ async function removeDevice(siteId, rackId, deviceId){
     if(error) return { error: error.message };
   } else if(dev){
     const uLabel = dev.sizeU>1 ? `U${dev.startU}-${dev.startU+dev.sizeU-1}` : `U${dev.startU}`;
-    pushDemoHistory(rack, 'device_removed', `${dev.model} — ${dev.actualKw.toFixed(2)} kW (${uLabel})`);
+    pushDemoHistory(rack, 'device_removed', `${dev.model}${dev.serialNumber?` (SN ${dev.serialNumber})`:''} — ${dev.actualKw.toFixed(2)} kW (${uLabel})`);
   }
   rack.devices = rack.devices.filter(d=>d.id!==deviceId);
   recomputeRack(rack); recomputeSite(site);
@@ -259,6 +268,35 @@ async function updateRackCapacity(siteId, rackId, newCapacityKw){
   return { ok:true };
 }
 
+async function updateRackRow(siteId, rackId, newRow){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  if(!rack || rack.row===newRow) return { ok:true, unchanged:true };
+  const oldRow = rack.row;
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ row_label: newRow }).eq('id', rackId);
+    if(error) return { error: error.message };
+  } else {
+    pushDemoHistory(rack, 'rack_moved', `Row ${oldRow||'—'} -> Row ${newRow||'—'}`);
+  }
+  rack.row = newRow;
+  return { ok:true };
+}
+
+async function renameRack(siteId, rackId, newName){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  const oldName = rack.name || rack.id;
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ name: newName }).eq('id', rackId);
+    if(error) return { error: error.message };
+  } else {
+    pushDemoHistory(rack, 'rack_renamed', `${oldName} -> ${newName}`);
+  }
+  rack.name = newName;
+  return { ok:true };
+}
+
 function slugify(name){
   const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'site';
   let id = base, n = 1;
@@ -272,13 +310,14 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
   const rackDefs = [];
   for(let i=1;i<=rackCount;i++){
     const row = String.fromCharCode(65 + Math.floor((i-1)/racksPerRow));
-    rackDefs.push({ id:`${id.toUpperCase()}-R${String(i).padStart(3,'0')}`, row, capacityKw:defaultCapacityKw });
+    const rid = `${id.toUpperCase()}-R${String(i).padStart(3,'0')}`;
+    rackDefs.push({ id:rid, name:rid, row, capacityKw:defaultCapacityKw });
   }
 
   if(LIVE){
     const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue });
     if(e1) return { error: e1.message };
-    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:id, row_label:r.row, capacity_kw:r.capacityKw }));
+    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:id, row_label:r.row, name:r.name, capacity_kw:r.capacityKw }));
     for(let i=0;i<rackRows.length;i+=500){
       const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
       if(e2) return { error: e2.message };
@@ -460,7 +499,7 @@ function renderDashboard(){
           </div>
           <div style="display:flex;gap:8px;margin-bottom:14px;">
             ${isManager() ? `<button class="btn btn-primary btn-sm" data-add-device="${s.id}">+ Add device</button>` : ''}
-            ${isAdmin() ? `<button class="btn btn-sm btn-danger" data-remove-site="${s.id}" data-remove-site-name="${esc(s.name)}">Remove site</button>` : ''}
+            ${isManager() ? `<button class="btn btn-sm btn-danger" data-remove-site="${s.id}" data-remove-site-name="${esc(s.name)}">Remove site</button>` : ''}
           </div>
           <div class="gaugewrap">
             ${gaugeSvg(s.utilizationPct,62)}
@@ -488,11 +527,11 @@ function filteredSortedRacks(site){
   let list = site.racks;
   if(state.search.trim()){
     const q = state.search.trim().toLowerCase();
-    list = list.filter(r => r.id.toLowerCase().includes(q) ||
-      r.devices.some(d=>d.model.toLowerCase().includes(q) || d.authorizedPerson.toLowerCase().includes(q)));
+    list = list.filter(r => r.id.toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q) ||
+      r.devices.some(d=>d.model.toLowerCase().includes(q) || d.authorizedPerson.toLowerCase().includes(q) || (d.serialNumber||'').toLowerCase().includes(q)));
   }
   const sorted = [...list];
-  if(state.sort==='name') sorted.sort((a,b)=>a.id.localeCompare(b.id));
+  if(state.sort==='name') sorted.sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id));
   if(state.sort==='util_desc') sorted.sort((a,b)=>(b.totalActualKw/b.capacityKw)-(a.totalActualKw/a.capacityKw));
   if(state.sort==='util_asc') sorted.sort((a,b)=>(a.totalActualKw/a.capacityKw)-(b.totalActualKw/b.capacityKw));
   return sorted;
@@ -511,7 +550,7 @@ function renderSite(site){
         racks.map(r=>{
           const pct = r.capacityKw>0 ? r.totalActualKw/r.capacityKw : 0;
           return `<div class="listrow" data-open-rack="${r.id}">
-            <div class="mono" style="font-weight:600;">${r.id}</div>
+            <div class="mono" style="font-weight:600;">${esc(r.name||r.id)}</div>
             <div class="barbg"><div class="barfill" style="width:${Math.min(100,pct*100)}%;background:${statusHex(pct)};"></div></div>
             <div class="mono" style="text-align:right;color:var(--text2);">${r.totalActualKw.toFixed(1)} kW</div>
             <div class="mono" style="text-align:right;color:var(--text3);">/ ${r.capacityKw} kW</div>
@@ -527,22 +566,25 @@ function renderSite(site){
   const byRow = {};
   racks.forEach(r=>{ (byRow[r.row] = byRow[r.row]||[]).push(r); });
   const rowKeys = Object.keys(byRow).sort();
+  const draggable = isManager();
   const floorHtml = `
     <div class="floorlegend">
       <span><span class="legdot" style="background:#1FA97A;"></span>Normal (&lt;75%)</span>
       <span><span class="legdot" style="background:#C9821A;"></span>Warning (75–90%)</span>
       <span><span class="legdot" style="background:#D6373C;"></span>Critical (&gt;90%)</span>
+      ${draggable ? `<span class="faint" style="margin-left:auto;">Drag a rack tile onto another row to move it</span>` : ''}
     </div>
     <div class="card" style="padding:18px 20px;">
       ${rowKeys.length===0 ? `<div style="padding:24px;text-align:center;color:var(--text3);font-size:13px;">No racks match this search.</div>` :
       rowKeys.map(rk=>`
         <div class="rowblock">
           <div class="rowlabel">ROW ${rk}</div>
-          <div class="racktiles">
+          <div class="racktiles" ${draggable ? `data-row-drop="${esc(rk)}"` : ''}>
             ${byRow[rk].map(r=>{
               const pct = r.capacityKw>0 ? r.totalActualKw/r.capacityKw : 0;
               const num = r.id.split('-R')[1] || r.id;
-              return `<div class="racktile" data-open-rack="${r.id}" style="background:${statusHex(pct)};" title="${r.id} · ${fmtPct(pct)} · ${r.totalActualKw.toFixed(1)} kW">${num}</div>`;
+              const label = esc(r.name||r.id);
+              return `<div class="racktile${draggable?' drag':''}" data-open-rack="${r.id}" ${draggable ? `draggable="true" data-drag-rack="${r.id}"` : ''} style="background:${statusHex(pct)};" title="${label} · ${fmtPct(pct)} · ${r.totalActualKw.toFixed(1)} kW">${num}</div>`;
             }).join('')}
           </div>
         </div>
@@ -559,7 +601,7 @@ function renderSite(site){
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${isManager() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
-        ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
+        ${isManager() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
       </div>
     </div>
@@ -578,7 +620,7 @@ function renderSite(site){
     </div>
 
     <div class="toolrow">
-      <input class="search-input" id="searchbox" placeholder="Search rack ID, device model, or authorized person…" value="${esc(state.search)}"/>
+      <input class="search-input" id="searchbox" placeholder="Search rack name, device model, serial number, or authorized person…" value="${esc(state.search)}"/>
       ${state.siteSub==='list' ? `
       <select class="sort-select" id="sortsel">
         <option value="name" ${state.sort==='name'?'selected':''}>Sort: rack name</option>
@@ -632,7 +674,7 @@ function renderRackModal(rack, site){
       }
     }
     elevationHtml = `
-      <div class="elev-caption"><span>${rack.id} · 42U</span><span>top = U42</span></div>
+      <div class="elev-caption"><span>${esc(rack.name||rack.id)} · 42U</span><span>top = U42</span></div>
       <div class="elevation-wrap">
         <div class="u-gutter">${gutter.join('')}</div>
         <div class="elevation">${rows.join('')}</div>
@@ -669,13 +711,26 @@ function renderRackModal(rack, site){
     </div>
   `;
 
+  const rackNameHtml = state.editingRackName ? `
+    <div>
+      ${state.rackNameError ? `<div class="form-error" style="margin:0 0 4px;">${esc(state.rackNameError)}</div>` : ''}
+      <div class="capbox">
+        <input id="rackNameInput" type="text" value="${esc(rack.name||rack.id)}" style="font-size:16px;font-weight:700;width:220px;"/>
+        <button class="btn btn-primary btn-sm" id="saveRackName">Save</button>
+        <button class="btn btn-sm" id="cancelRackName">Cancel</button>
+      </div>
+    </div>
+  ` : `
+    <div class="sitename" style="font-size:19px;">${esc(rack.name||rack.id)} ${isManager() ? `<button class="editlink" id="editRackNameBtn">rename</button>` : ''}</div>
+  `;
+
   return `
   <div class="overlay" id="overlay">
     <div class="modal" style="max-width:1000px;">
       <div class="modal-top">
         <div>
-          <div class="sitename" style="font-size:19px;">${rack.id}</div>
-          <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')} · Row ${esc(rack.row||'—')}</div>
+          ${rackNameHtml}
+          <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')} · Row ${esc(rack.row||'—')}${rack.name && rack.name!==rack.id ? ` · <span class="faint">ID ${rack.id}</span>` : ''}</div>
         </div>
         <button class="modal-close" id="closeModal">&times;</button>
       </div>
@@ -707,7 +762,7 @@ function renderRackModal(rack, site){
           <div style="max-height:500px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
             <table class="inv">
               <thead><tr>
-                <th class="num">U</th><th>Device</th><th class="num">Actual</th><th class="num">Datasheet</th><th>Authorized person</th>${isManager()?'<th class="rm-col"></th>':''}
+                <th class="num">U</th><th>Device</th><th>Serial #</th><th class="num">Actual</th><th class="num">Datasheet</th><th>Authorized person</th>${isManager()?'<th class="rm-col"></th>':''}
               </tr></thead>
               <tbody>
                 ${[...rack.devices].sort((a,b)=>b.startU-a.startU).map(d=>{
@@ -717,6 +772,7 @@ function renderRackModal(rack, site){
                   <tr>
                     <td class="num"><span class="ubadge">${uLabel}</span></td>
                     <td><div class="model-cell"><span class="swatch" style="background:${swatch};"></span><span style="font-weight:600;">${esc(d.model)}</span></div></td>
+                    <td class="mono faint" style="font-size:11px;">${esc(d.serialNumber||'—')}</td>
                     <td class="num" style="color:var(--purple-dark);font-weight:600;">${d.actualKw.toFixed(2)}<span class="faint" style="font-weight:400;font-size:10px;"> kW</span></td>
                     <td class="num faint">${d.datasheetKw.toFixed(2)}<span style="font-size:10px;"> kW</span></td>
                     <td><div class="person-cell"><span class="avatar">${esc(initials(d.authorizedPerson))}</span><span class="faint" style="font-size:11.5px;">${esc(d.authorizedPerson)}</span></div></td>
@@ -726,7 +782,7 @@ function renderRackModal(rack, site){
               </tbody>
               <tfoot>
                 <tr>
-                  <td colspan="2" class="faint">Total (${rack.devices.length} devices)</td>
+                  <td colspan="3" class="faint">Total (${rack.devices.length} devices)</td>
                   <td class="num" style="color:var(--purple-dark);">${rack.totalActualKw.toFixed(2)}</td>
                   <td class="num">${rack.totalDatasheetKw.toFixed(2)}</td>
                   <td></td>${isManager()?'<td></td>':''}
@@ -773,7 +829,7 @@ function renderAddDeviceModal(){
           <div class="field">
             <label>Rack</label>
             <select id="fRack">
-              ${rackOptions.map(r=>`<option value="${r.id}" ${r.id===preselectRack?'selected':''}>${r.id} (${42-r.occupiedU}U free)</option>`).join('')}
+              ${rackOptions.map(r=>`<option value="${r.id}" ${r.id===preselectRack?'selected':''}>${esc(r.name||r.id)} (${42-r.occupiedU}U free)</option>`).join('')}
             </select>
           </div>
         </div>
@@ -790,10 +846,14 @@ function renderAddDeviceModal(){
             <input id="fSize" type="number" min="1" max="42" step="1" value="1"/>
           </div>
           <div class="field">
-            <label>Authorized person</label>
-            <input id="fPerson" list="peopleList" placeholder="Name — team" autocomplete="off"/>
-            <datalist id="peopleList">${PEOPLE.map(p=>`<option value="${esc(p)}">`).join('')}</datalist>
+            <label>Serial number</label>
+            <input id="fSerial" type="text" placeholder="e.g. SN-4471X" autocomplete="off"/>
           </div>
+        </div>
+
+        <div class="field">
+          <label>Authorized person</label>
+          <input id="fPerson" type="text" placeholder="Name — team" autocomplete="off"/>
         </div>
 
         <div class="field-row">
@@ -935,8 +995,8 @@ function renderEditSiteModal(){
 /* ---------------------------------------------------------------
    RACK HISTORY MODAL
 --------------------------------------------------------------- */
-const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', capacity_changed:'Capacity' };
-const HISTORY_COLORS = { device_added:'green', device_removed:'red', capacity_changed:'amber' };
+const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', capacity_changed:'Capacity', rack_moved:'Moved', rack_renamed:'Renamed' };
+const HISTORY_COLORS = { device_added:'green', device_removed:'red', capacity_changed:'amber', rack_moved:'amber', rack_renamed:'amber' };
 
 function fmtWhen(iso){
   const d = new Date(iso);
@@ -951,7 +1011,7 @@ function renderHistoryModal(rack){
     <div class="modal" style="max-width:520px;">
       <div class="modal-top">
         <div>
-          <div class="sitename" style="font-size:18px;">History — ${rack.id}</div>
+          <div class="sitename" style="font-size:18px;">History — ${esc(rack.name||rack.id)}</div>
           <div class="siteloc" style="margin-top:2px;">Every device add/remove and capacity change, last 6 months</div>
         </div>
         <button class="modal-close" id="closeHistory">&times;</button>
@@ -1176,6 +1236,21 @@ function renderModal(){
     const cancelCap = document.getElementById('cancelCapacity');
     if(cancelCap) cancelCap.addEventListener('click', ()=>{ state.editingCapacity=false; state.capacityError=null; renderModal(); });
 
+    const editNameBtn = document.getElementById('editRackNameBtn');
+    if(editNameBtn) editNameBtn.addEventListener('click', ()=>{ state.editingRackName=true; state.rackNameError=null; renderModal(); });
+    const saveName = document.getElementById('saveRackName');
+    if(saveName) saveName.addEventListener('click', async ()=>{
+      const val = document.getElementById('rackNameInput').value.trim();
+      if(!val){ state.rackNameError='Enter a rack name.'; renderModal(); return; }
+      const res = await renameRack(site.id, rack.id, val);
+      if(res.error){ state.rackNameError=res.error; renderModal(); return; }
+      state.editingRackName=false; state.rackNameError=null;
+      showToast(`Rack renamed to ${val}.`);
+      renderModal(); render();
+    });
+    const cancelName = document.getElementById('cancelRackName');
+    if(cancelName) cancelName.addEventListener('click', ()=>{ state.editingRackName=false; state.rackNameError=null; renderModal(); });
+
     modalRoot.querySelectorAll('[data-remove-device]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirm('Remove this device from the rack?')) return;
@@ -1230,6 +1305,7 @@ function closeModal(){
   state.modalRack=null; state.modalSiteId=null; state.rackFace='front';
   state.modalType=null; state.addDeviceSiteId=null; state.addDeviceRackId=null; state.addDeviceError=null;
   state.editingCapacity=false; state.capacityError=null; state.addSiteError=null;
+  state.editingRackName=false; state.rackNameError=null;
   state.editSiteId=null; state.editSiteError=null;
   renderModal();
 }
@@ -1266,17 +1342,19 @@ async function handleAddDeviceSubmit(e){
   const rackId = document.getElementById('fRack').value;
   const model = document.getElementById('fModel').value.trim();
   const sizeU = parseInt(document.getElementById('fSize').value, 10);
+  const serial = document.getElementById('fSerial').value.trim();
   const person = document.getElementById('fPerson').value.trim();
   const actual = parseFloat(document.getElementById('fActual').value);
   const datasheet = parseFloat(document.getElementById('fDatasheet').value);
 
   if(!model){ state.addDeviceError='Enter a device model.'; renderModal(); return; }
+  if(!serial){ state.addDeviceError='Enter a serial number.'; renderModal(); return; }
   if(!person){ state.addDeviceError='Enter an authorized person.'; renderModal(); return; }
   if(!Number.isInteger(sizeU) || sizeU<1 || sizeU>42){ state.addDeviceError='Size must be a whole number between 1 and 42 U.'; renderModal(); return; }
   if(isNaN(actual) || actual<=0){ state.addDeviceError='Enter a valid actual consumption greater than 0.'; renderModal(); return; }
   if(isNaN(datasheet) || datasheet<=0){ state.addDeviceError='Enter a valid datasheet consumption greater than 0.'; renderModal(); return; }
 
-  const res = await addDevice({ siteId, rackId, model, sizeU, actualKw:actual, datasheetKw:datasheet, authorizedPerson:person });
+  const res = await addDevice({ siteId, rackId, model, sizeU, serialNumber:serial, actualKw:actual, datasheetKw:datasheet, authorizedPerson:person });
   if(res.error){ state.addDeviceError = res.error; renderModal(); return; }
 
   const wasRackModal = state.modalRack && state.modalRack.id === rackId;
@@ -1373,6 +1451,32 @@ function attachHandlers(){
       render();
     });
   });
+  if(isManager()){
+    rootEl.querySelectorAll('[data-drag-rack]').forEach(el=>{
+      el.addEventListener('dragstart', (e)=>{
+        state.draggingRackId = el.getAttribute('data-drag-rack');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', state.draggingRackId);
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', ()=>{ el.classList.remove('dragging'); state.draggingRackId=null; });
+    });
+    rootEl.querySelectorAll('[data-row-drop]').forEach(el=>{
+      el.addEventListener('dragover', (e)=>{ e.preventDefault(); e.dataTransfer.dropEffect='move'; el.classList.add('drop-hover'); });
+      el.addEventListener('dragleave', ()=>{ el.classList.remove('drop-hover'); });
+      el.addEventListener('drop', async (e)=>{
+        e.preventDefault();
+        el.classList.remove('drop-hover');
+        const rackId = e.dataTransfer.getData('text/plain') || state.draggingRackId;
+        const newRow = el.getAttribute('data-row-drop');
+        if(!rackId || !newRow) return;
+        const res = await updateRackRow(state.siteId, rackId, newRow);
+        if(res.error){ showToast(res.error, true); return; }
+        if(!res.unchanged) showToast(`${rackId} moved to Row ${newRow}.`);
+        render();
+      });
+    });
+  }
   const seedBtn = document.getElementById('seedBtn');
   if(seedBtn) seedBtn.addEventListener('click', seedDemoDataToSupabase);
   const sb2 = document.getElementById('searchbox');

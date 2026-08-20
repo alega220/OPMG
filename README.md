@@ -44,10 +44,10 @@ Opening `index.html` in a browser is enough to try the demo.
 6. **Open the app and create your first account** via the "Create
    account" tab on the login screen. Every new sign-up defaults to
    the `technician` role.
-7. **Promote yourself to admin.** In Supabase: **Table Editor →
-   profiles**, find your row, change `role` from `technician` to
-   `admin`, save. (Admin is a superset of manager — see the roles
-   table below.)
+7. **Promote yourself to manager (or admin).** In Supabase: **Table
+   Editor → profiles**, find your row, change `role` from
+   `technician` to `manager` (or `admin` — see the roles table below;
+   admin currently has no extra powers over manager).
 8. **Seed initial data.** Sign back in — as a manager/admin on an
    empty project you'll see a **"Seed demo data"** button on the
    dashboard. Click it once to populate the 4 sample sites (B90, A12,
@@ -131,42 +131,37 @@ facility-ops/
 | View sites, racks, devices, analysis, history | ✅ | ✅ | ✅ |
 | Add a device | ❌ | ✅ | ✅ |
 | Remove a device | ❌ | ✅ | ✅ |
+| Rename a rack | ❌ | ✅ | ✅ |
+| Move a rack to a different row | ❌ | ✅ | ✅ |
 | Edit a rack's max power | ❌ | ✅ | ✅ |
 | Add a site (configure racks + rows) | ❌ | ✅ | ✅ |
-| Remove a site | ❌ | ❌ | ✅ |
+| Remove a site | ❌ | ✅ | ✅ |
 | Seed demo data (empty project only) | ❌ | ✅ | ✅ |
 
-Admin is a superset of manager, plus the one thing managers can't do:
-delete a site. Permissions are enforced twice: the UI hides the
-controls for roles that shouldn't see them, and the database
-(`schema.sql`'s RLS policies) rejects the write even if someone calls
-the API directly. Read access is open to any signed-in user; there's
-no anonymous access in live mode.
+Admin currently has no extra powers beyond manager — it's kept as a
+separate role label in case you want to split permissions further
+later. Permissions are enforced twice: the UI hides the controls for
+roles that shouldn't see them, and the database (`schema.sql`'s RLS
+policies) rejects the write even if someone calls the API directly.
+Read access is open to any signed-in user; there's no anonymous
+access in live mode.
 
 ## What's new since the last version
 
-- **Add site** (managers + admins) requires configuring the site up
-  front: name, location, tier, PUE, **number of racks**, **number of
-  rows**, and **maximum power per rack** — the app lays racks out
-  into rows (Row A, Row B, …) automatically from those numbers and
-  applies the power ceiling to every rack it creates.
-- **Edit site** (managers + admins): an "edit" link next to the site
-  name in the site view lets you update name, location, tier, and PUE
-  at any time. Rack count/rows are structural and set only at
-  creation; individual rack power can still be changed per-rack.
-- **Remove site** (admins only): deletes the site and cascades to all
-  its racks and devices.
-- **Rack view, redesigned again, more thoroughly:** the elevation
-  (left) now has a U-number gutter with 5U rhythm marks like a real
-  elevation chart, two-line labels for multi-U devices (model + U
-  range + kW), and a power-density color legend. The inventory table
-  (right) now shows a color swatch per row matching its elevation
-  block, a badge-styled U column, right-aligned kW figures, and
-  avatar-initial chips for the authorized person — considerably
-  easier to scan than a plain table.
-- **History button** inside every rack's detail view — shows every
-  device added/removed and every capacity change **from the last 6
-  months**, who did it, and when. In live mode this is captured
-  automatically by database triggers (`rack_events` table in
-  `schema.sql`), so it
-  can't be bypassed by going around the UI.
+- **Remove site** and **remove device** are both manager-level
+  actions now (previously site removal required admin). Admin has
+  no extra powers beyond manager at the moment.
+- **Serial number** is now tracked per device — required when adding
+  a device, shown as its own column in the rack inventory table, and
+  included in the add/remove history log.
+- **Authorized person** is a plain free-text field when adding a
+  device — it's no longer pulled from (or constrained to) a
+  suggestion list, so you can type any name.
+- **Rack renaming**: every rack has an editable display name,
+  independent of its internal ID (so devices, history, and links
+  keep working even after a rename). Click "rename" next to the rack
+  name in its detail view. Renames are logged to history.
+- **Drag-and-drop rack repositioning** in the floor plan: managers
+  can drag any rack tile onto any row to move it there — no more
+  fixed row assignment. The move is logged to history the same way
+  capacity changes are.
