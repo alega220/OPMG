@@ -116,6 +116,12 @@ const fmtPct = (n,d=0)=> `${((n||0)*100).toFixed(d)}%`;
 function statusColor(pct){ if(pct>=0.9) return 'red'; if(pct>=0.75) return 'amber'; return 'green'; }
 function statusHex(pct){ if(pct>=0.9) return '#D6373C'; if(pct>=0.75) return '#C9821A'; return '#1FA97A'; }
 function statusLabel(pct){ if(pct>=0.9) return 'Critical'; if(pct>=0.75) return 'Warning'; return 'Normal'; }
+function tileColor(rack, pct){
+  if(rack.devices && rack.devices.length===0){
+    return (rack.customer && rack.customer.trim()) ? '#6C4EE3' : '#FFFFFF';
+  }
+  return statusHex(pct);
+}
 function densityColor(kwPerU){
   const t = Math.max(0, Math.min(1, kwPerU/2.2));
   let r,g,b;
@@ -184,7 +190,7 @@ async function loadData(){
         id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         actualKw:Number(d.actual_kw), datasheetKw:Number(d.datasheet_kw), authorizedPerson:d.authorized_person,
       }));
-      const rack = { id:r.id, name:r.name||r.id, row:r.row_label, capacityKw:Number(r.capacity_kw), devices };
+      const rack = { id:r.id, name:r.name||r.id, row:r.row_label, capacityKw:Number(r.capacity_kw), customer:r.customer||'', activationDate:r.activation_date||'', devices };
       recomputeRack(rack);
       return rack;
     });
@@ -280,6 +286,28 @@ async function updateRackRow(siteId, rackId, newRow){
     pushDemoHistory(rack, 'rack_moved', `Row ${oldRow||'—'} -> Row ${newRow||'—'}`);
   }
   rack.row = newRow;
+  return { ok:true };
+}
+
+async function updateRackCustomer(siteId, rackId, newCustomer){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ customer: newCustomer }).eq('id', rackId);
+    if(error) return { error: error.message };
+  }
+  rack.customer = newCustomer;
+  return { ok:true };
+}
+
+async function updateRackActivationDate(siteId, rackId, newDate){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ activation_date: newDate || null }).eq('id', rackId);
+    if(error) return { error: error.message };
+  }
+  rack.activationDate = newDate;
   return { ok:true };
 }
 
@@ -569,6 +597,8 @@ function renderSite(site){
   const draggable = isManager();
   const floorHtml = `
     <div class="floorlegend">
+      <span><span class="legdot" style="background:#FFFFFF;border:1px solid var(--border);"></span>Empty</span>
+      <span><span class="legdot" style="background:#6C4EE3;"></span>Booked (no devices yet)</span>
       <span><span class="legdot" style="background:#1FA97A;"></span>Normal (&lt;75%)</span>
       <span><span class="legdot" style="background:#C9821A;"></span>Warning (75–90%)</span>
       <span><span class="legdot" style="background:#D6373C;"></span>Critical (&gt;90%)</span>
@@ -584,7 +614,12 @@ function renderSite(site){
               const pct = r.capacityKw>0 ? r.totalActualKw/r.capacityKw : 0;
               const num = r.id.split('-R')[1] || r.id;
               const label = esc(r.name||r.id);
-              return `<div class="racktile${draggable?' drag':''}" data-open-rack="${r.id}" ${draggable ? `draggable="true" data-drag-rack="${r.id}"` : ''} style="background:${statusHex(pct)};" title="${label} · ${fmtPct(pct)} · ${r.totalActualKw.toFixed(1)} kW">${num}</div>`;
+              const tileBg = tileColor(r, pct);
+              const isEmpty = r.devices.length===0;
+              const isBooked = isEmpty && r.customer && r.customer.trim();
+              const emptyNote = isBooked ? ` · Booked (${esc(r.customer)})` : (isEmpty ? ' · Empty' : '');
+              const needsBorder = (tileBg==='#FFFFFF');
+              return `<div class="racktile${draggable?' drag':''}" data-open-rack="${r.id}" ${draggable ? `draggable="true" data-drag-rack="${r.id}"` : ''} style="background:${tileBg};${needsBorder?'color:#333;border:1px solid var(--border);':''}" title="${label} · ${fmtPct(pct)} · ${r.totalActualKw.toFixed(1)} kW${emptyNote}">${num}</div>`;
             }).join('')}
           </div>
         </div>
@@ -711,6 +746,40 @@ function renderRackModal(rack, site){
     </div>
   `;
 
+  const customerHtml = state.editingCustomer ? `
+    <div>
+      <div class="stat-label">Customer</div>
+      ${state.customerError ? `<div class="form-error" style="margin:4px 0;">${esc(state.customerError)}</div>` : ''}
+      <div class="capbox">
+        <input id="customerInput" type="text" value="${esc(rack.customer||'')}" style="width:160px;"/>
+        <button class="btn btn-primary btn-sm" id="saveCustomer">Save</button>
+        <button class="btn btn-sm" id="cancelCustomer">Cancel</button>
+      </div>
+    </div>
+  ` : `
+    <div>
+      <div class="stat-label">Customer</div>
+      <div class="stat-value" style="font-size:15px;">${esc(rack.customer||'—')} ${isManager() ? `<button class="editlink" id="editCustomerBtn">edit</button>` : ''}</div>
+    </div>
+  `;
+
+  const activationHtml = state.editingActivation ? `
+    <div>
+      <div class="stat-label">Activation date</div>
+      ${state.activationError ? `<div class="form-error" style="margin:4px 0;">${esc(state.activationError)}</div>` : ''}
+      <div class="capbox">
+        <input id="activationInput" type="date" value="${esc(rack.activationDate||'')}"/>
+        <button class="btn btn-primary btn-sm" id="saveActivation">Save</button>
+        <button class="btn btn-sm" id="cancelActivation">Cancel</button>
+      </div>
+    </div>
+  ` : `
+    <div>
+      <div class="stat-label">Activation date</div>
+      <div class="stat-value" style="font-size:15px;">${esc(rack.activationDate||'—')} ${isManager() ? `<button class="editlink" id="editActivationBtn">edit</button>` : ''}</div>
+    </div>
+  `;
+
   const rackNameHtml = state.editingRackName ? `
     <div>
       ${state.rackNameError ? `<div class="form-error" style="margin:0 0 4px;">${esc(state.rackNameError)}</div>` : ''}
@@ -740,6 +809,8 @@ function renderRackModal(rack, site){
         <div><div class="stat-label">Datasheet power</div><div class="stat-value">${fmtKw(rack.totalDatasheetKw,2)}</div></div>
         ${capacityHtml}
         <div><div class="stat-label">Utilization</div><span class="badge ${statusColor(pct)}">${fmtPct(pct)} · ${statusLabel(pct)}</span></div>
+        ${customerHtml}
+        ${activationHtml}
       </div>
 
       <div class="rackview-grid">
@@ -1235,6 +1306,34 @@ function renderModal(){
     });
     const cancelCap = document.getElementById('cancelCapacity');
     if(cancelCap) cancelCap.addEventListener('click', ()=>{ state.editingCapacity=false; state.capacityError=null; renderModal(); });
+
+    const editCustBtn = document.getElementById('editCustomerBtn');
+    if(editCustBtn) editCustBtn.addEventListener('click', ()=>{ state.editingCustomer=true; state.customerError=null; renderModal(); });
+    const saveCust = document.getElementById('saveCustomer');
+    if(saveCust) saveCust.addEventListener('click', async ()=>{
+      const val = document.getElementById('customerInput').value.trim();
+      const res = await updateRackCustomer(site.id, rack.id, val);
+      if(res.error){ state.customerError=res.error; renderModal(); return; }
+      state.editingCustomer=false; state.customerError=null;
+      showToast(`Customer updated.`);
+      renderModal(); render();
+    });
+    const cancelCust = document.getElementById('cancelCustomer');
+    if(cancelCust) cancelCust.addEventListener('click', ()=>{ state.editingCustomer=false; state.customerError=null; renderModal(); });
+
+    const editActBtn = document.getElementById('editActivationBtn');
+    if(editActBtn) editActBtn.addEventListener('click', ()=>{ state.editingActivation=true; state.activationError=null; renderModal(); });
+    const saveAct = document.getElementById('saveActivation');
+    if(saveAct) saveAct.addEventListener('click', async ()=>{
+      const val = document.getElementById('activationInput').value;
+      const res = await updateRackActivationDate(site.id, rack.id, val);
+      if(res.error){ state.activationError=res.error; renderModal(); return; }
+      state.editingActivation=false; state.activationError=null;
+      showToast(`Activation date updated.`);
+      renderModal(); render();
+    });
+    const cancelAct = document.getElementById('cancelActivation');
+    if(cancelAct) cancelAct.addEventListener('click', ()=>{ state.editingActivation=false; state.activationError=null; renderModal(); });
 
     const editNameBtn = document.getElementById('editRackNameBtn');
     if(editNameBtn) editNameBtn.addEventListener('click', ()=>{ state.editingRackName=true; state.rackNameError=null; renderModal(); });
