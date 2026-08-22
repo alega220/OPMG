@@ -122,11 +122,6 @@ input,select{font-family:var(--sans);}
 .racktiles{display:flex;flex-wrap:wrap;gap:4px;}
 .racktile{width:30px;height:30px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;font-family:var(--mono);cursor:pointer;color:#fff;border:1px solid rgba(0,0,0,0.06);}
 .racktile:hover{outline:2px solid var(--purple);outline-offset:1px;}
-.racktile.drag{cursor:grab;}
-.racktile.drag:active{cursor:grabbing;}
-.racktile.dragging{opacity:0.35;outline:2px dashed var(--purple);outline-offset:1px;}
-.racktiles[data-row-drop]{border-radius:6px;transition:background 0.12s,outline 0.12s;padding:2px;}
-.racktiles[data-row-drop].drop-hover{background:var(--purple-bg,rgba(108,78,227,0.10));outline:2px dashed var(--purple);outline-offset:2px;}
 
 /* modal */
 .overlay{position:fixed;inset:0;background:rgba(20,22,28,0.45);z-index:60;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto;}
@@ -134,7 +129,7 @@ input,select{font-family:var(--sans);}
 .modal-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;}
 .modal-close{background:var(--bg-alt);border:1px solid var(--border);color:var(--text2);border-radius:7px;width:30px;height:30px;font-size:14px;}
 .modal-close:hover{background:var(--border);}
-.modal-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+.modal-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px;}
 
 .viewtoggle{display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;width:fit-content;margin-bottom:10px;}
 .viewtoggle button{background:var(--bg);border:none;padding:6px 14px;font-size:12px;font-weight:600;color:var(--text2);}
@@ -213,7 +208,7 @@ input,select{font-family:var(--sans);}
 table.inv{width:100%;border-collapse:collapse;font-size:12.5px;}
 table.inv thead th{position:sticky;top:0;background:var(--bg-alt);text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text2);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap;}
 table.inv thead th.num{text-align:right;}
-table.inv thead th.rm-col{width:34px;}
+table.inv thead th.rm-col{width:30px;}
 table.inv tbody td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}
 table.inv tbody tr:nth-child(even){background:var(--bg-alt);}
 table.inv tbody tr:hover{background:var(--purple-bg);}

@@ -44,10 +44,10 @@ Opening `index.html` in a browser is enough to try the demo.
 6. **Open the app and create your first account** via the "Create
    account" tab on the login screen. Every new sign-up defaults to
    the `technician` role.
-7. **Promote yourself to manager (or admin).** In Supabase: **Table
-   Editor → profiles**, find your row, change `role` from
-   `technician` to `manager` (or `admin` — see the roles table below;
-   admin currently has no extra powers over manager).
+7. **Promote yourself to admin.** In Supabase: **Table Editor →
+   profiles**, find your row, change `role` from `technician` to
+   `admin`, save. (Admin is a superset of manager — see the roles
+   table below.)
 8. **Seed initial data.** Sign back in — as a manager/admin on an
    empty project you'll see a **"Seed demo data"** button on the
    dashboard. Click it once to populate the 4 sample sites (B90, A12,
@@ -131,37 +131,76 @@ facility-ops/
 | View sites, racks, devices, analysis, history | ✅ | ✅ | ✅ |
 | Add a device | ❌ | ✅ | ✅ |
 | Remove a device | ❌ | ✅ | ✅ |
-| Rename a rack | ❌ | ✅ | ✅ |
-| Move a rack to a different row | ❌ | ✅ | ✅ |
 | Edit a rack's max power | ❌ | ✅ | ✅ |
 | Add a site (configure racks + rows) | ❌ | ✅ | ✅ |
-| Remove a site | ❌ | ✅ | ✅ |
+| Remove a site | ❌ | ❌ | ✅ |
 | Seed demo data (empty project only) | ❌ | ✅ | ✅ |
 
-Admin currently has no extra powers beyond manager — it's kept as a
-separate role label in case you want to split permissions further
-later. Permissions are enforced twice: the UI hides the controls for
-roles that shouldn't see them, and the database (`schema.sql`'s RLS
-policies) rejects the write even if someone calls the API directly.
-Read access is open to any signed-in user; there's no anonymous
-access in live mode.
+Admin is a superset of manager, plus the one thing managers can't do:
+delete a site. Permissions are enforced twice: the UI hides the
+controls for roles that shouldn't see them, and the database
+(`schema.sql`'s RLS policies) rejects the write even if someone calls
+the API directly. Read access is open to any signed-in user; there's
+no anonymous access in live mode.
+
+## Power model: kVA, and where "actual power" lives
+
+All power figures are now shown in **kVA**. More importantly, the
+data model changed: **actual (measured) power now belongs to the
+rack, not the device.** A rack's actual power is a number a manager
+or admin types in directly (e.g. from a PDU/circuit reading) via the
+"edit" link on its detail view — it is not summed from devices.
+
+Devices still carry a **datasheet (rated/nameplate) figure** each,
+useful for capacity planning, but there's no per-device "actual"
+field anymore. If you're upgrading from an older install where
+devices did have actual power, `schema.sql` automatically sums each
+rack's existing device values into that rack's new `actual_kva`
+before removing the old column — nothing is lost, it just moves up
+to the rack level, where you can now correct it with a real reading.
 
 ## What's new since the last version
 
-- **Remove site** and **remove device** are both manager-level
-  actions now (previously site removal required admin). Admin has
-  no extra powers beyond manager at the moment.
-- **Serial number** is now tracked per device — required when adding
-  a device, shown as its own column in the rack inventory table, and
-  included in the add/remove history log.
-- **Authorized person** is a plain free-text field when adding a
-  device — it's no longer pulled from (or constrained to) a
-  suggestion list, so you can type any name.
-- **Rack renaming**: every rack has an editable display name,
-  independent of its internal ID (so devices, history, and links
-  keep working even after a rename). Click "rename" next to the rack
-  name in its detail view. Renames are logged to history.
-- **Drag-and-drop rack repositioning** in the floor plan: managers
-  can drag any rack tile onto any row to move it there — no more
-  fixed row assignment. The move is logged to history the same way
-  capacity changes are.
+- **Modify a device**: every device row in a rack's inventory table
+  now has an edit (✎) icon next to remove (managers + admins) —
+  change its model, size, serial number, datasheet rating, or
+  authorized person. If you resize it, it's automatically re-placed
+  into the next free slot that fits.
+- **Add a rack to any row** of an existing site — not just at site
+  creation. A "+ Add rack" button in the site view opens a small form
+  (rack name, row — existing or brand new, max power, optional
+  circuit breaker). No devices required; add them afterward.
+- **Circuit breaker #** is now a field on every rack, editable the
+  same way as capacity (managers + admins), shown in the rack detail
+  view.
+- **Power is now kVA everywhere**, and — see above — actual power
+  moved from device-level to rack-level, entered directly rather than
+  computed.
+
+## Previously added
+
+- **Add site** (managers + admins) requires configuring the site up
+  front: name, location, tier, PUE, **number of racks**, **number of
+  rows**, and **maximum power per rack** — the app lays racks out
+  into rows (Row A, Row B, …) automatically from those numbers and
+  applies the power ceiling to every rack it creates.
+- **Edit site** (managers + admins): an "edit" link next to the site
+  name in the site view lets you update name, location, tier, and PUE
+  at any time. Rack count/rows are structural and set only at
+  creation; individual rack power can still be changed per-rack.
+- **Remove site** (admins only): deletes the site and cascades to all
+  its racks and devices.
+- **Rack view, redesigned again, more thoroughly:** the elevation
+  (left) now has a U-number gutter with 5U rhythm marks like a real
+  elevation chart, two-line labels for multi-U devices (model + U
+  range + kW), and a power-density color legend. The inventory table
+  (right) now shows a color swatch per row matching its elevation
+  block, a badge-styled U column, right-aligned kW figures, and
+  avatar-initial chips for the authorized person — considerably
+  easier to scan than a plain table.
+- **History button** inside every rack's detail view — shows every
+  device added/removed and every capacity change **from the last 6
+  months**, who did it, and when. In live mode this is captured
+  automatically by database triggers (`rack_events` table in
+  `schema.sql`), so it
+  can't be bypassed by going around the UI.
