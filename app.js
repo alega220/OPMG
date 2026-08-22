@@ -74,7 +74,7 @@ function generateRack(rng, siteId, idx, caps, rowLen){
   }
   const row = String.fromCharCode(65 + Math.floor((idx-1)/rowLen));
   const position = (idx-1) % rowLen;
-  return { id:`${siteId.toUpperCase()}-R${String(idx).padStart(3,"0")}`, row, position, capacityKva, actualKva:Math.round(curPower*100)/100, circuitBreaker:null, devices };
+  return { id:`${siteId.toUpperCase()}-R${String(idx).padStart(3,"0")}`, row, position, capacityKva, actualKva:Math.round(curPower*100)/100, circuitBreaker:null, customer:null, activationDate:null, devices };
 }
 function generateSite(def){
   const rng = mulberry32(hashStr(def.id) ^ 0x9E3779B9);
@@ -118,6 +118,21 @@ const fmtKva = (n,d=1)=> `${(n||0).toFixed(d)} kVA`;
 const fmtPct = (n,d=0)=> `${((n||0)*100).toFixed(d)}%`;
 function statusColor(pct){ if(pct>=0.9) return 'red'; if(pct>=0.75) return 'amber'; return 'green'; }
 function statusHex(pct){ if(pct>=0.9) return '#D6373C'; if(pct>=0.75) return '#C9821A'; return '#1FA97A'; }
+function rackTileVisual(rack){
+  const hasDevices = rack.devices.length > 0;
+  const hasCustomer = !!(rack.customer && rack.customer.trim());
+  if(!hasDevices && !hasCustomer){
+    return { bg:'#FFFFFF', border:'1.5px solid var(--border)', text:'var(--text2)',
+      title:`${rack.id} · Available` };
+  }
+  if(!hasDevices && hasCustomer){
+    return { bg:'#6C4EE3', border:'1px solid rgba(0,0,0,0.06)', text:'#fff',
+      title:`${rack.id} · Booked — ${rack.customer}` };
+  }
+  const pct = rack.capacityKva>0 ? rack.actualKva/rack.capacityKva : 0;
+  return { bg:statusHex(pct), border:'1px solid rgba(0,0,0,0.06)', text:'#fff',
+    title:`${rack.id} · ${fmtPct(pct)} · ${rack.actualKva.toFixed(1)} kVA` };
+}
 function statusLabel(pct){ if(pct>=0.9) return 'Critical'; if(pct>=0.75) return 'Warning'; return 'Normal'; }
 function densityColor(kwPerU){
   const t = Math.max(0, Math.min(1, kwPerU/2.2));
@@ -153,6 +168,9 @@ const state = {
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
   editingCapacity:false, capacityError:null,
+  editingActual:false, actualError:null,
+  editingBreaker:false,
+  editingCustomer:false, editingActivation:false,
   editingRackName:false, rackNameError:null,
   addSiteError:null,
   editSiteId:null, editSiteError:null,
@@ -188,7 +206,7 @@ async function loadData(){
         id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         datasheetKva:Number(d.datasheet_kva), authorizedPerson:d.authorized_person,
       }));
-      const rack = { id:r.id, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, devices };
+      const rack = { id:r.id, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, devices };
       recomputeRack(rack);
       return rack;
     });
@@ -337,6 +355,34 @@ async function updateRackBreaker(siteId, rackId, newBreaker){
   return { ok:true };
 }
 
+async function updateRackCustomer(siteId, rackId, newCustomer){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  const oldCustomer = rack.customer;
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ customer: newCustomer || null }).eq('id', rackId);
+    if(error) return { error: error.message };
+  } else {
+    pushDemoHistory(rack, 'customer_changed', `${oldCustomer||'—'} -> ${newCustomer||'—'}`);
+  }
+  rack.customer = newCustomer || null;
+  return { ok:true };
+}
+
+async function updateRackActivation(siteId, rackId, newDate){
+  const site = SITES.find(s=>s.id===siteId);
+  const rack = site.racks.find(r=>r.id===rackId);
+  const oldDate = rack.activationDate;
+  if(LIVE){
+    const { error } = await sb.from('racks').update({ activation_date: newDate || null }).eq('id', rackId);
+    if(error) return { error: error.message };
+  } else {
+    pushDemoHistory(rack, 'activation_changed', `${oldDate||'—'} -> ${newDate||'—'}`);
+  }
+  rack.activationDate = newDate || null;
+  return { ok:true };
+}
+
 async function moveRack(siteId, rackId, targetRow, beforeRackId){
   const site = SITES.find(s=>s.id===siteId);
   const rack = site.racks.find(r=>r.id===rackId);
@@ -394,7 +440,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
   for(let i=1;i<=rackCount;i++){
     const row = String.fromCharCode(65 + Math.floor((i-1)/racksPerRow));
     const position = (i-1) % racksPerRow;
-    rackDefs.push({ id:`${id.toUpperCase()}-R${String(i).padStart(3,'0')}`, row, position, capacityKva:defaultCapacityKva, actualKva:0, circuitBreaker:null });
+    rackDefs.push({ id:`${id.toUpperCase()}-R${String(i).padStart(3,'0')}`, row, position, capacityKva:defaultCapacityKva, actualKva:0, circuitBreaker:null, customer:null, activationDate:null });
   }
 
   if(LIVE){
@@ -428,7 +474,7 @@ async function addRackToSite(siteId, { rackId, row, capacityKva, circuitBreaker 
     if(error) return { error: error.message };
   }
 
-  const rack = { id:rackId, row, position, capacityKva, actualKva:0, circuitBreaker:circuitBreaker||null, devices:[], history:[] };
+  const rack = { id:rackId, row, position, capacityKva, actualKva:0, circuitBreaker:circuitBreaker||null, customer:null, activationDate:null, devices:[], history:[] };
   recomputeRack(rack);
   site.racks.push(rack);
   recomputeSite(site);
@@ -689,6 +735,8 @@ function renderSite(site){
   const rowKeys = Object.keys(byRow).sort();
   const floorHtml = `
     <div class="floorlegend">
+      <span><span class="legdot" style="background:#FFFFFF;border:1px solid var(--border);"></span>Available (empty)</span>
+      <span><span class="legdot" style="background:#6C4EE3;"></span>Booked (customer, no devices)</span>
       <span><span class="legdot" style="background:#1FA97A;"></span>Normal (&lt;75%)</span>
       <span><span class="legdot" style="background:#C9821A;"></span>Warning (75–90%)</span>
       <span><span class="legdot" style="background:#D6373C;"></span>Critical (&gt;90%)</span>
@@ -701,8 +749,8 @@ function renderSite(site){
           <div class="rowlabel">ROW ${esc(rk)}</div>
           <div class="racktiles" data-row="${esc(rk)}">
             ${byRow[rk].map(r=>{
-              const pct = r.capacityKva>0 ? r.actualKva/r.capacityKva : 0;
-              return `<div class="racktile" draggable="${isManager()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${statusHex(pct)};" title="${r.id} · ${fmtPct(pct)} · ${r.actualKva.toFixed(1)} kVA">${esc(rackShortLabel(r.id))}</div>`;
+              const v = rackTileVisual(r);
+              return `<div class="racktile" draggable="${isManager()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)}">${esc(rackShortLabel(r.id))}</div>`;
             }).join('')}
           </div>
         </div>
@@ -864,6 +912,42 @@ function renderRackModal(rack, site){
     </div>
   `;
 
+  const hasDevices = rack.devices.length > 0;
+  const hasCustomer = !!(rack.customer && rack.customer.trim());
+  const bookingStatus = hasDevices ? null : (hasCustomer ? { label:'Booked', color:'purple' } : { label:'Available', color:'green' });
+
+  const customerHtml = state.editingCustomer ? `
+    <div>
+      <div class="stat-label">Customer</div>
+      <div class="capbox">
+        <input id="customerInput" value="${esc(rack.customer||'')}" placeholder="e.g. Al-Futtaim" style="width:160px;"/>
+        <button class="btn btn-primary btn-sm" id="saveCustomer">Save</button>
+        <button class="btn btn-sm" id="cancelCustomer">Cancel</button>
+      </div>
+    </div>
+  ` : `
+    <div>
+      <div class="stat-label">Customer</div>
+      <div class="stat-value">${rack.customer ? esc(rack.customer) : '<span class="faint">—</span>'} ${isManager() ? `<button class="editlink" id="editCustomerBtn">edit</button>` : ''}</div>
+    </div>
+  `;
+
+  const activationHtml = state.editingActivation ? `
+    <div>
+      <div class="stat-label">Activation date</div>
+      <div class="capbox">
+        <input id="activationInput" type="date" value="${rack.activationDate||''}"/>
+        <button class="btn btn-primary btn-sm" id="saveActivation">Save</button>
+        <button class="btn btn-sm" id="cancelActivation">Cancel</button>
+      </div>
+    </div>
+  ` : `
+    <div>
+      <div class="stat-label">Activation date</div>
+      <div class="stat-value">${rack.activationDate ? esc(rack.activationDate) : '<span class="faint">—</span>'} ${isManager() ? `<button class="editlink" id="editActivationBtn">edit</button>` : ''}</div>
+    </div>
+  `;
+
   return `
   <div class="overlay" id="overlay">
     <div class="modal" style="max-width:1060px;">
@@ -877,7 +961,7 @@ function renderRackModal(rack, site){
             </div>
             ${state.rackNameError ? `<div class="form-error" style="margin-top:6px;">${esc(state.rackNameError)}</div>` : ''}
           ` : `
-            <div class="sitename" style="font-size:19px;">${esc(rack.id)} ${isManager() ? `<button class="editlink" id="editRackNameBtn">rename</button>` : ''}</div>
+            <div class="sitename" style="font-size:19px;">${esc(rack.id)} ${isManager() ? `<button class="editlink" id="editRackNameBtn">rename</button>` : ''} ${bookingStatus ? `<span class="badge ${bookingStatus.color}">${bookingStatus.label}</span>` : ''}</div>
           `}
           <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')} · Row ${esc(rack.row||'—')}</div>
         </div>
@@ -890,6 +974,11 @@ function renderRackModal(rack, site){
         ${capacityHtml}
         ${breakerHtml}
         <div><div class="stat-label">Utilization</div><span class="badge ${statusColor(pct)}">${fmtPct(pct)} · ${statusLabel(pct)}</span></div>
+      </div>
+
+      <div class="modal-kpis" style="grid-template-columns:repeat(2,1fr);margin-top:-8px;">
+        ${customerHtml}
+        ${activationHtml}
       </div>
 
       <div class="rackview-grid">
@@ -1250,8 +1339,8 @@ function renderAddRackModal(){
 /* ---------------------------------------------------------------
    RACK HISTORY MODAL
 --------------------------------------------------------------- */
-const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', device_edited:'Edited', capacity_changed:'Capacity', actual_changed:'Actual', breaker_changed:'Breaker', rack_moved:'Moved', rack_renamed:'Renamed' };
-const HISTORY_COLORS = { device_added:'green', device_removed:'red', device_edited:'amber', capacity_changed:'amber', actual_changed:'amber', breaker_changed:'amber', rack_moved:'amber', rack_renamed:'amber' };
+const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', device_edited:'Edited', capacity_changed:'Capacity', actual_changed:'Actual', breaker_changed:'Breaker', customer_changed:'Customer', activation_changed:'Activation', rack_moved:'Moved', rack_renamed:'Renamed' };
+const HISTORY_COLORS = { device_added:'green', device_removed:'red', device_edited:'amber', capacity_changed:'amber', actual_changed:'amber', breaker_changed:'amber', customer_changed:'purple', activation_changed:'purple', rack_moved:'amber', rack_renamed:'amber' };
 
 function fmtWhen(iso){
   const d = new Date(iso);
@@ -1520,6 +1609,34 @@ function renderModal(){
     const cancelBreaker = document.getElementById('cancelBreaker');
     if(cancelBreaker) cancelBreaker.addEventListener('click', ()=>{ state.editingBreaker=false; renderModal(); });
 
+    const editCustomerBtn = document.getElementById('editCustomerBtn');
+    if(editCustomerBtn) editCustomerBtn.addEventListener('click', ()=>{ state.editingCustomer=true; renderModal(); });
+    const saveCustomer = document.getElementById('saveCustomer');
+    if(saveCustomer) saveCustomer.addEventListener('click', async ()=>{
+      const val = document.getElementById('customerInput').value.trim();
+      const res = await updateRackCustomer(site.id, rack.id, val);
+      if(res.error){ showToast(res.error, true); return; }
+      state.editingCustomer=false;
+      showToast(`${rack.id} customer updated`);
+      renderModal(); render();
+    });
+    const cancelCustomer = document.getElementById('cancelCustomer');
+    if(cancelCustomer) cancelCustomer.addEventListener('click', ()=>{ state.editingCustomer=false; renderModal(); });
+
+    const editActivationBtn = document.getElementById('editActivationBtn');
+    if(editActivationBtn) editActivationBtn.addEventListener('click', ()=>{ state.editingActivation=true; renderModal(); });
+    const saveActivation = document.getElementById('saveActivation');
+    if(saveActivation) saveActivation.addEventListener('click', async ()=>{
+      const val = document.getElementById('activationInput').value;
+      const res = await updateRackActivation(site.id, rack.id, val);
+      if(res.error){ showToast(res.error, true); return; }
+      state.editingActivation=false;
+      showToast(`${rack.id} activation date updated`);
+      renderModal(); render();
+    });
+    const cancelActivation = document.getElementById('cancelActivation');
+    if(cancelActivation) cancelActivation.addEventListener('click', ()=>{ state.editingActivation=false; renderModal(); });
+
     const editNameBtn = document.getElementById('editRackNameBtn');
     if(editNameBtn) editNameBtn.addEventListener('click', ()=>{ state.editingRackName=true; state.rackNameError=null; renderModal(); });
     const saveNameBtn = document.getElementById('saveRackName');
@@ -1619,6 +1736,7 @@ function closeModal(){
   state.modalType=null; state.addDeviceSiteId=null; state.addDeviceRackId=null; state.addDeviceError=null;
   state.editingCapacity=false; state.capacityError=null; state.addSiteError=null;
   state.editingActual=false; state.actualError=null; state.editingBreaker=false;
+  state.editingCustomer=false; state.editingActivation=false;
   state.editingRackName=false; state.rackNameError=null;
   state.editSiteId=null; state.editSiteError=null;
   state.addRackError=null;
