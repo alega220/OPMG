@@ -187,6 +187,20 @@ function isAdmin(){ return state.role === 'admin'; }
 /* ---------------------------------------------------------------
    DATA LAYER — demo vs live
 --------------------------------------------------------------- */
+async function fetchAllRows(table){
+  const pageSize = 1000;
+  let from = 0;
+  let all = [];
+  while(true){
+    const { data, error } = await sb.from(table).select('*').range(from, from + pageSize - 1);
+    if(error) return { data: null, error };
+    all = all.concat(data||[]);
+    if(!data || data.length < pageSize) break;
+    from += pageSize;
+  }
+  return { data: all, error: null };
+}
+
 async function loadData(){
   if(!LIVE){
     SITES = SITE_DEFS.map(generateSite);
@@ -194,9 +208,9 @@ async function loadData(){
     return;
   }
   const [{data: siteRows, error: e1}, {data: rackRows, error: e2}, {data: deviceRows, error: e3}] = await Promise.all([
-    sb.from('sites').select('*'),
-    sb.from('racks').select('*'),
-    sb.from('devices').select('*'),
+    fetchAllRows('sites'),
+    fetchAllRows('racks'),
+    fetchAllRows('devices'),
   ]);
   if(e1 || e2 || e3){ showToast('Failed to load data from Supabase — check console.', true); console.error(e1||e2||e3); SITES=[]; state.ready=true; return; }
 
