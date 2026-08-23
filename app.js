@@ -96,6 +96,9 @@ function recomputeRack(rack){
   // not derived from devices — only totalDatasheetKva (sum of device ratings) and
   // occupiedU are computed here.
   rack.totalDatasheetKva = rack.devices.reduce((s,d)=>s+d.datasheetKva,0);
+  // displayed "datasheet power" is the nameplate total derated by an assumed
+  // 0.6 utilization/power factor, not the raw nameplate sum
+  rack.totalDatasheetKw = rack.totalDatasheetKva * 0.6;
   rack.occupiedU = rack.devices.reduce((s,d)=>s+d.sizeU,0);
 }
 function recomputeSite(site){
@@ -273,23 +276,40 @@ async function addDevice({ siteId, rackId, model, sizeU, serialNumber, datasheet
   return { ok:true, rack, startU:freeStart };
 }
 
-async function editDevice(siteId, rackId, deviceId, { model, sizeU, serialNumber, datasheetKva, authorizedPerson }){
+async function editDevice(siteId, rackId, deviceId, { model, sizeU, startU: requestedStartU, serialNumber, datasheetKva, authorizedPerson }){
   const site = SITES.find(s=>s.id===siteId);
   const rack = site.racks.find(r=>r.id===rackId);
   const dev = rack.devices.find(d=>d.id===deviceId);
   if(!dev) return { error:'Device not found.' };
 
+  // check whether the requested position (with the requested size) is free,
+  // ignoring the device's own current slot
+  function slotIsFree(start, size){
+    if(start < 1 || start + size - 1 > 42) return false;
+    return !rack.devices.some(d=>{
+      if(d.id === deviceId) return false;
+      return start < d.startU + d.sizeU && start + size > d.startU;
+    });
+  }
+
   let startU = dev.startU;
-  if(sizeU !== dev.sizeU){
-    const freeStart = findFreeSlot(rack, sizeU, deviceId);
-    if(freeStart===null) return { error: `${rack.id} doesn't have ${sizeU} contiguous U free for this size. Try a smaller size.` };
-    startU = freeStart;
+  const wantsMove = requestedStartU !== undefined && requestedStartU !== dev.startU;
+  if(sizeU !== dev.sizeU || wantsMove){
+    const desiredStart = wantsMove ? requestedStartU : dev.startU;
+    if(slotIsFree(desiredStart, sizeU)){
+      startU = desiredStart;
+    } else {
+      const freeStart = findFreeSlot(rack, sizeU, deviceId);
+      if(freeStart===null) return { error: `${rack.id} doesn't have ${sizeU} contiguous U free for this size. Try a smaller size.` };
+      startU = freeStart;
+    }
   }
 
   const changes = [];
   if(model !== dev.model) changes.push(`model ${dev.model} -> ${model}`);
   if(serialNumber !== dev.serialNumber) changes.push(`serial ${dev.serialNumber||'—'} -> ${serialNumber||'—'}`);
   if(sizeU !== dev.sizeU) changes.push(`size ${dev.sizeU}U -> ${sizeU}U`);
+  if(startU !== dev.startU) changes.push(`position U${dev.startU} -> U${startU}`);
   if(datasheetKva !== dev.datasheetKva) changes.push(`datasheet ${dev.datasheetKva.toFixed(2)} -> ${datasheetKva.toFixed(2)} kVA`);
   if(authorizedPerson !== dev.authorizedPerson) changes.push(`authorized person ${dev.authorizedPerson} -> ${authorizedPerson}`);
 
@@ -984,7 +1004,7 @@ function renderRackModal(rack, site){
 
       <div class="modal-kpis">
         ${actualHtml}
-        <div><div class="stat-label">Datasheet power</div><div class="stat-value">${fmtKva(rack.totalDatasheetKva,2)}</div><div class="stat-sub">sum of device ratings</div></div>
+        <div><div class="stat-label">Datasheet power</div><div class="stat-value">${rack.totalDatasheetKw.toFixed(2)} kW</div><div class="stat-sub">nameplate sum × 0.6</div></div>
         ${capacityHtml}
         ${breakerHtml}
         <div><div class="stat-label">Utilization</div><span class="badge ${statusColor(pct)}">${fmtPct(pct)} · ${statusLabel(pct)}</span></div>
@@ -1036,7 +1056,7 @@ function renderRackModal(rack, site){
               <tfoot>
                 <tr>
                   <td colspan="3" class="faint">Total (${rack.devices.length} devices)</td>
-                  <td class="num">${rack.totalDatasheetKva.toFixed(2)}</td>
+                  <td class="num">${rack.totalDatasheetKva.toFixed(2)} <span class="faint" style="font-size:10px;">(${rack.totalDatasheetKw.toFixed(2)} kW)</span></td>
                   <td></td>${isManager()?'<td colspan="2"></td>':''}
                 </tr>
               </tfoot>
@@ -1154,13 +1174,18 @@ function renderEditDeviceModal(){
 
         <div class="field-row">
           <div class="field">
+            <label>Start position (U)</label>
+            <input id="eStartU" type="number" min="1" max="42" step="1" value="${dev.startU}"/>
+          </div>
+          <div class="field">
             <label>Size (U)</label>
             <input id="eSize" type="number" min="1" max="42" step="1" value="${dev.sizeU}"/>
           </div>
-          <div class="field">
-            <label>Serial number</label>
-            <input id="eSerial" value="${esc(dev.serialNumber||'')}" autocomplete="off"/>
-          </div>
+        </div>
+
+        <div class="field">
+          <label>Serial number</label>
+          <input id="eSerial" value="${esc(dev.serialNumber||'')}" autocomplete="off"/>
         </div>
 
         <div class="field">
@@ -1172,7 +1197,7 @@ function renderEditDeviceModal(){
           <label>Datasheet consumption (kVA)</label>
           <input id="eDatasheet" type="number" min="0" step="0.01" value="${dev.datasheetKva}"/>
         </div>
-        <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">Changing size will re-place this device in the next free slot if its current position no longer fits.</div>
+        <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">If the position you set overlaps another device, it'll be re-placed in the next free slot instead.</div>
 
         <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;">
           <button type="button" class="btn" id="cancelEditDevice">Cancel</button>
@@ -1816,6 +1841,7 @@ async function handleEditDeviceSubmit(e){
   const rackId = state.editDeviceRackId;
   const deviceId = state.editDeviceId;
   const model = document.getElementById('eModel').value.trim();
+  const startU = parseInt(document.getElementById('eStartU').value, 10);
   const sizeU = parseInt(document.getElementById('eSize').value, 10);
   const serial = document.getElementById('eSerial').value.trim();
   const person = document.getElementById('ePerson').value.trim();
@@ -1824,9 +1850,10 @@ async function handleEditDeviceSubmit(e){
   if(!model){ state.editDeviceError='Enter a device model.'; renderModal(); return; }
   if(!person){ state.editDeviceError='Enter an authorized person.'; renderModal(); return; }
   if(!Number.isInteger(sizeU) || sizeU<1 || sizeU>42){ state.editDeviceError='Size must be a whole number between 1 and 42 U.'; renderModal(); return; }
+  if(!Number.isInteger(startU) || startU<1 || startU>42){ state.editDeviceError='Start position must be a whole number between 1 and 42 U.'; renderModal(); return; }
   if(isNaN(datasheet) || datasheet<=0){ state.editDeviceError='Enter a valid datasheet consumption greater than 0.'; renderModal(); return; }
 
-  const res = await editDevice(siteId, rackId, deviceId, { model, sizeU, serialNumber:serial, datasheetKva:datasheet, authorizedPerson:person });
+  const res = await editDevice(siteId, rackId, deviceId, { model, sizeU, startU, serialNumber:serial, datasheetKva:datasheet, authorizedPerson:person });
   if(res.error){ state.editDeviceError = res.error; renderModal(); return; }
 
   closeModal();
