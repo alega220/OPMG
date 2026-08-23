@@ -166,7 +166,7 @@ function showToast(msg, isError){
 --------------------------------------------------------------- */
 let SITES = [];
 const state = {
-  ready:false, user:null, role: LIVE ? null : 'manager',
+  ready:false, user:null, role: LIVE ? null : 'engineer', approved: LIVE ? false : true,
   view:'dashboard', siteId:null, siteSub:'floor', search:'', sort:'name',
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
@@ -181,10 +181,11 @@ const state = {
   editDeviceId:null, editDeviceRackId:null, editDeviceSiteId:null, editDeviceError:null,
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
+  userManagerData:null, userManagerError:null, userManagerLoading:false,
 };
-// managers AND admins can add/remove sites, racks, and devices; edit rack capacity/position/name
-function isManager(){ return state.role === 'manager' || state.role === 'admin'; }
-// kept for possible future use — not currently required by any permission check
+// engineers AND admins can add/remove devices, racks, and edit rack capacity/position/name
+// within their assigned sites; only admins can create/remove sites or manage users
+function isEngineer(){ return state.role === 'engineer' || state.role === 'admin'; }
 function isAdmin(){ return state.role === 'admin'; }
 
 /* ---------------------------------------------------------------
@@ -235,7 +236,7 @@ async function loadData(){
 }
 
 async function seedDemoDataToSupabase(){
-  if(!LIVE || !isManager()) return;
+  if(!LIVE || !isEngineer()) return;
   showToast('Seeding demo data — this can take a minute…');
   const demo = SITE_DEFS.map(generateSite);
   for(const site of demo){
@@ -556,6 +557,39 @@ async function loadRackHistory(rackId){
 }
 
 /* ---------------------------------------------------------------
+   USER MANAGEMENT (admin only, live mode)
+--------------------------------------------------------------- */
+async function fetchUserManagerData(){
+  const [{data: profiles, error:e1}, {data: assignments, error:e2}] = await Promise.all([
+    sb.from('profiles').select('*').order('created_at'),
+    sb.from('site_assignments').select('*'),
+  ]);
+  if(e1) return { error: e1.message };
+  if(e2) return { error: e2.message };
+  return { ok:true, profiles: profiles||[], assignments: assignments||[] };
+}
+async function setUserApproved(userId, approved){
+  const { error } = await sb.from('profiles').update({ approved }).eq('id', userId);
+  if(error) return { error: error.message };
+  return { ok:true };
+}
+async function setUserRole(userId, role){
+  const { error } = await sb.from('profiles').update({ role }).eq('id', userId);
+  if(error) return { error: error.message };
+  return { ok:true };
+}
+async function setSiteAssignment(userId, siteId, assign){
+  if(assign){
+    const { error } = await sb.from('site_assignments').insert({ user_id:userId, site_id:siteId, assigned_by: state.user.id });
+    if(error) return { error: error.message };
+  } else {
+    const { error } = await sb.from('site_assignments').delete().eq('user_id', userId).eq('site_id', siteId);
+    if(error) return { error: error.message };
+  }
+  return { ok:true };
+}
+
+/* ---------------------------------------------------------------
    AUTH (live mode only)
 --------------------------------------------------------------- */
 async function initAuth(){
@@ -563,14 +597,28 @@ async function initAuth(){
   const { data: { session } } = await sb.auth.getSession();
   if(session) await onSignedIn(session.user);
   sb.auth.onAuthStateChange((event, session)=>{
-    if(event==='SIGNED_OUT'){ state.user=null; state.role=null; renderRoot(); }
+    if(event==='SIGNED_OUT'){ state.user=null; state.role=null; state.approved=false; renderRoot(); }
   });
 }
 async function onSignedIn(user){
   state.user = user;
   const { data: profile } = await sb.from('profiles').select('*').eq('id', user.id).single();
   state.role = profile ? profile.role : 'technician';
+  state.approved = profile ? !!profile.approved : false;
+  if(!state.approved){
+    state.ready = true;
+    renderRoot();
+    return;
+  }
   await loadData();
+  renderRoot();
+}
+async function recheckApproval(){
+  if(!state.user) return;
+  const { data: profile } = await sb.from('profiles').select('*').eq('id', state.user.id).single();
+  state.role = profile ? profile.role : 'technician';
+  state.approved = profile ? !!profile.approved : false;
+  if(state.approved) await loadData();
   renderRoot();
 }
 async function signIn(email, password){
@@ -582,11 +630,11 @@ async function signUp(email, password){
   const { data, error } = await sb.auth.signUp({ email, password });
   if(error){ state.authError = error.message; renderRoot(); return; }
   if(data.session){ await onSignedIn(data.user); }
-  else { state.authError = null; state.authMode='signin'; showToast('Account created — check your email to confirm, then sign in.'); renderRoot(); }
+  else { state.authError = null; state.authMode='signin'; showToast('Account created — check your email to confirm, then sign in. An admin will need to approve your account before you can access any data.'); renderRoot(); }
 }
 async function signOut(){
   await sb.auth.signOut();
-  state.user=null; state.role=null; SITES=[]; state.view='dashboard'; state.siteId=null;
+  state.user=null; state.role=null; state.approved=false; SITES=[]; state.view='dashboard'; state.siteId=null;
   renderRoot();
 }
 
@@ -614,7 +662,7 @@ function renderLogin(){
         </div>
         <button type="submit" class="btn btn-primary login-submit">${state.authMode==='signin' ? 'Sign in' : 'Create account'}</button>
       </form>
-      <div class="form-hint">New accounts default to Technician (read-only). A manager can promote you from the Supabase dashboard.</div>
+      <div class="form-hint">New accounts need admin approval before you can sign in and see any data.</div>
     </div>
   </div>`;
 }
@@ -640,15 +688,15 @@ function renderDashboard(){
     return `
       <div class="h1">Colocation facility operations</div>
       <div class="muted" style="font-size:13px;margin:8px 0 20px;">No sites yet in this Supabase project.</div>
-      ${isManager() ? `<button class="btn btn-primary" id="seedBtn">Seed demo data (4 sites)</button>` :
-        `<div class="faint" style="font-size:13px;">Ask a manager to seed initial site data.</div>`}
+      ${isAdmin() ? `<button class="btn btn-primary" id="seedBtn">Seed demo data (4 sites)</button>` :
+        `<div class="faint" style="font-size:13px;">Ask an admin to seed initial site data.</div>`}
     `;
   }
 
   return `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
       <div class="h1">Colocation facility operations</div>
-      ${isManager() ? `<button class="btn btn-primary" id="openAddSite">+ Add site</button>` : ''}
+      ${isAdmin() ? `<button class="btn btn-primary" id="openAddSite">+ Add site</button>` : ''}
     </div>
     <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racks} racks · portfolio utilization ${fmtPct(pct)}</div>
 
@@ -681,8 +729,8 @@ function renderDashboard(){
             <span class="badge ${statusColor(s.utilizationPct)}">${statusLabel(s.utilizationPct)}</span>
           </div>
           <div style="display:flex;gap:8px;margin-bottom:14px;">
-            ${isManager() ? `<button class="btn btn-primary btn-sm" data-add-device="${s.id}">+ Add device</button>` : ''}
-            ${isManager() ? `<button class="btn btn-sm btn-danger" data-remove-site="${s.id}" data-remove-site-name="${esc(s.name)}">Remove site</button>` : ''}
+            ${isEngineer() ? `<button class="btn btn-primary btn-sm" data-add-device="${s.id}">+ Add device</button>` : ''}
+            ${isAdmin() ? `<button class="btn btn-sm btn-danger" data-remove-site="${s.id}" data-remove-site-name="${esc(s.name)}">Remove site</button>` : ''}
           </div>
           <div class="gaugewrap">
             ${gaugeSvg(s.utilizationPct,62)}
@@ -774,7 +822,7 @@ function renderSite(site){
       <span><span class="legdot" style="background:#1FA97A;"></span>Normal (&lt;75%)</span>
       <span><span class="legdot" style="background:#C9821A;"></span>Warning (75–90%)</span>
       <span><span class="legdot" style="background:#D6373C;"></span>Critical (&gt;90%)</span>
-      ${isManager() ? `<span class="faint" style="margin-left:auto;">Drag a rack to move it between or within rows</span>` : ''}
+      ${isEngineer() ? `<span class="faint" style="margin-left:auto;">Drag a rack to move it between or within rows</span>` : ''}
     </div>
     <div class="card" style="padding:18px 20px;">
       ${rowKeys.length===0 ? `<div style="padding:24px;text-align:center;color:var(--text3);font-size:13px;">No racks match this search.</div>` :
@@ -784,7 +832,7 @@ function renderSite(site){
           <div class="racktiles" data-row="${esc(rk)}">
             ${byRow[rk].map(r=>{
               const v = rackTileVisual(r);
-              return `<div class="racktile" draggable="${isManager()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)}">${esc(rackShortLabel(r.id))}</div>`;
+              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)}">${esc(rackShortLabel(r.id))}</div>`;
             }).join('')}
           </div>
         </div>
@@ -796,13 +844,13 @@ function renderSite(site){
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
       <div>
-        <div class="sitename" style="font-size:24px;">${site.name} ${isManager() ? `<button class="editlink" id="openEditSite" style="font-size:12px;">edit</button>` : ''}</div>
+        <div class="sitename" style="font-size:24px;">${site.name} ${isEngineer() ? `<button class="editlink" id="openEditSite" style="font-size:12px;">edit</button>` : ''}</div>
         <div class="siteloc" style="margin-top:3px;">${esc(site.location||'')} · ${site.tier||''} · ${site.racks.length} racks</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
-        ${isManager() ? `<button class="btn" data-add-rack="${site.id}">+ Add rack</button>` : ''}
-        ${isManager() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
-        ${isManager() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
+        ${isEngineer() ? `<button class="btn" data-add-rack="${site.id}">+ Add rack</button>` : ''}
+        ${isEngineer() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
+        ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
       </div>
     </div>
@@ -908,7 +956,7 @@ function renderRackModal(rack, site){
   ` : `
     <div>
       <div class="stat-label">Max power (rack capacity)</div>
-      <div class="stat-value">${fmtKva(rack.capacityKva,1)} ${isManager() ? `<button class="editlink" id="editCapacityBtn">edit</button>` : ''}</div>
+      <div class="stat-value">${fmtKva(rack.capacityKva,1)} ${isEngineer() ? `<button class="editlink" id="editCapacityBtn">edit</button>` : ''}</div>
     </div>
   `;
 
@@ -926,7 +974,7 @@ function renderRackModal(rack, site){
   ` : `
     <div>
       <div class="stat-label">Actual power (measured)</div>
-      <div class="stat-value">${fmtKva(rack.actualKva,2)} ${isManager() ? `<button class="editlink" id="editActualBtn">edit</button>` : ''}</div>
+      <div class="stat-value">${fmtKva(rack.actualKva,2)} ${isEngineer() ? `<button class="editlink" id="editActualBtn">edit</button>` : ''}</div>
     </div>
   `;
 
@@ -942,7 +990,7 @@ function renderRackModal(rack, site){
   ` : `
     <div>
       <div class="stat-label">Circuit breaker #</div>
-      <div class="stat-value">${rack.circuitBreaker ? esc(rack.circuitBreaker) : '<span class="faint">—</span>'} ${isManager() ? `<button class="editlink" id="editBreakerBtn">edit</button>` : ''}</div>
+      <div class="stat-value">${rack.circuitBreaker ? esc(rack.circuitBreaker) : '<span class="faint">—</span>'} ${isEngineer() ? `<button class="editlink" id="editBreakerBtn">edit</button>` : ''}</div>
     </div>
   `;
 
@@ -962,7 +1010,7 @@ function renderRackModal(rack, site){
   ` : `
     <div>
       <div class="stat-label">Customer</div>
-      <div class="stat-value">${rack.customer ? esc(rack.customer) : '<span class="faint">—</span>'} ${isManager() ? `<button class="editlink" id="editCustomerBtn">edit</button>` : ''}</div>
+      <div class="stat-value">${rack.customer ? esc(rack.customer) : '<span class="faint">—</span>'} ${isEngineer() ? `<button class="editlink" id="editCustomerBtn">edit</button>` : ''}</div>
     </div>
   `;
 
@@ -978,7 +1026,7 @@ function renderRackModal(rack, site){
   ` : `
     <div>
       <div class="stat-label">Activation date</div>
-      <div class="stat-value">${rack.activationDate ? esc(rack.activationDate) : '<span class="faint">—</span>'} ${isManager() ? `<button class="editlink" id="editActivationBtn">edit</button>` : ''}</div>
+      <div class="stat-value">${rack.activationDate ? esc(rack.activationDate) : '<span class="faint">—</span>'} ${isEngineer() ? `<button class="editlink" id="editActivationBtn">edit</button>` : ''}</div>
     </div>
   `;
 
@@ -995,7 +1043,7 @@ function renderRackModal(rack, site){
             </div>
             ${state.rackNameError ? `<div class="form-error" style="margin-top:6px;">${esc(state.rackNameError)}</div>` : ''}
           ` : `
-            <div class="sitename" style="font-size:19px;">${esc(rack.id)} ${isManager() ? `<button class="editlink" id="editRackNameBtn">rename</button>` : ''} ${bookingStatus ? `<span class="badge ${bookingStatus.color}">${bookingStatus.label}</span>` : ''}</div>
+            <div class="sitename" style="font-size:19px;">${esc(rack.id)} ${isEngineer() ? `<button class="editlink" id="editRackNameBtn">rename</button>` : ''} ${bookingStatus ? `<span class="badge ${bookingStatus.color}">${bookingStatus.label}</span>` : ''}</div>
           `}
           <div class="siteloc" style="margin-top:2px;">${site.name} · ${esc(site.location||'')} · Row ${esc(rack.row||'—')}</div>
         </div>
@@ -1030,12 +1078,12 @@ function renderRackModal(rack, site){
         <div class="rackview-right">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <div class="stat-label" style="margin:0;">Inventory</div>
-            ${isManager() ? `<button class="btn btn-primary btn-sm" data-add-device-rack="${rack.id}" data-add-device-site="${site.id}">+ Add device</button>` : ''}
+            ${isEngineer() ? `<button class="btn btn-primary btn-sm" data-add-device-rack="${rack.id}" data-add-device-site="${site.id}">+ Add device</button>` : ''}
           </div>
           <div style="max-height:500px;overflow-y:auto;overflow-x:auto;border:1px solid var(--border);border-radius:8px;">
             <table class="inv">
               <thead><tr>
-                <th class="num">U</th><th>Device</th><th>Serial #</th><th class="num">Datasheet</th><th>Authorized person</th>${isManager()?'<th class="rm-col" colspan="2"></th>':''}
+                <th class="num">U</th><th>Device</th><th>Serial #</th><th class="num">Datasheet</th><th>Authorized person</th>${isEngineer()?'<th class="rm-col" colspan="2"></th>':''}
               </tr></thead>
               <tbody>
                 ${[...rack.devices].sort((a,b)=>b.startU-a.startU).map(d=>{
@@ -1048,7 +1096,7 @@ function renderRackModal(rack, site){
                     <td class="mono faint" style="font-size:11px;">${esc(d.serialNumber||'—')}</td>
                     <td class="num faint">${d.datasheetKva.toFixed(2)}<span style="font-size:10px;"> kVA</span></td>
                     <td><div class="person-cell"><span class="avatar">${esc(initials(d.authorizedPerson))}</span><span class="faint" style="font-size:11.5px;">${esc(d.authorizedPerson)}</span></div></td>
-                    ${isManager() ? `<td class="rm"><button class="rm-btn" data-edit-device="${d.id}" data-edit-rack="${rack.id}" data-edit-site="${site.id}" title="Edit device">✎</button></td>
+                    ${isEngineer() ? `<td class="rm"><button class="rm-btn" data-edit-device="${d.id}" data-edit-rack="${rack.id}" data-edit-site="${site.id}" title="Edit device">✎</button></td>
                     <td class="rm"><button class="rm-btn" data-remove-device="${d.id}" data-remove-rack="${rack.id}" data-remove-site="${site.id}" title="Remove device">&times;</button></td>` : ''}
                   </tr>
                 `;}).join('')}
@@ -1057,7 +1105,7 @@ function renderRackModal(rack, site){
                 <tr>
                   <td colspan="3" class="faint">Total (${rack.devices.length} devices)</td>
                   <td class="num">${rack.totalDatasheetKva.toFixed(2)} <span class="faint" style="font-size:10px;">(${rack.totalDatasheetKw.toFixed(2)} kW)</span></td>
-                  <td></td>${isManager()?'<td colspan="2"></td>':''}
+                  <td></td>${isEngineer()?'<td colspan="2"></td>':''}
                 </tr>
               </tfoot>
             </table>
@@ -1144,7 +1192,7 @@ function renderAddDeviceModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT DEVICE MODAL (managers + admins)
+   EDIT DEVICE MODAL (engineers + admins)
 --------------------------------------------------------------- */
 function renderEditDeviceModal(){
   const site = SITES.find(s=>s.id===state.editDeviceSiteId);
@@ -1209,7 +1257,131 @@ function renderEditDeviceModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD SITE MODAL (managers + admins)
+   MANAGE USERS MODAL (admin only)
+--------------------------------------------------------------- */
+function renderUserManagerModal(){
+  const loading = state.userManagerLoading;
+  const err = state.userManagerError;
+  const data = state.userManagerData;
+  const allSites = [...SITES].sort((a,b)=>a.name.localeCompare(b.name));
+
+  let bodyHtml;
+  if(loading){
+    bodyHtml = `<div class="faint" style="padding:24px;text-align:center;">Loading users…</div>`;
+  } else if(err){
+    bodyHtml = `<div class="form-error">${esc(err)}</div>`;
+  } else if(data){
+    const assignmentsByUser = {};
+    data.assignments.forEach(a=>{ (assignmentsByUser[a.user_id] = assignmentsByUser[a.user_id]||[]).push(a.site_id); });
+
+    bodyHtml = data.profiles.map(p=>{
+      const isSelf = p.id === state.user.id;
+      const assignedSiteIds = assignmentsByUser[p.id] || [];
+      return `
+      <div data-user-row="${p.id}" style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:600;">${esc(p.email||p.id)}</div>
+            <div class="faint" style="font-size:11.5px;">joined ${p.created_at ? new Date(p.created_at).toLocaleDateString() : '—'}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;">
+            <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:${isSelf?'default':'pointer'};">
+              <input type="checkbox" data-approve-user="${p.id}" ${p.approved?'checked':''} ${isSelf?'disabled':''}/>
+              Approved
+            </label>
+            <select data-role-user="${p.id}" ${isSelf?'disabled':''} style="font-size:12.5px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:var(--bg);">
+              <option value="technician" ${p.role==='technician'?'selected':''}>Technician</option>
+              <option value="engineer" ${p.role==='engineer'?'selected':''}>Engineer</option>
+              <option value="admin" ${p.role==='admin'?'selected':''}>Admin</option>
+            </select>
+          </div>
+        </div>
+        ${p.role==='engineer' ? `
+        <div style="margin-top:10px;">
+          <div class="faint" style="font-size:11px;margin-bottom:5px;">Assigned sites:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${allSites.map(s=>`
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;border:1px solid var(--border);border-radius:14px;padding:4px 10px;cursor:pointer;${assignedSiteIds.includes(s.id)?'background:var(--purple-bg,rgba(108,78,227,0.10));border-color:var(--purple);':''}">
+                <input type="checkbox" data-assign-site="${s.id}" data-assign-user="${p.id}" ${assignedSiteIds.includes(s.id)?'checked':''}/>
+                ${esc(s.name)}
+              </label>
+            `).join('')}
+            ${allSites.length===0 ? `<span class="faint" style="font-size:11.5px;">No sites exist yet.</span>` : ''}
+          </div>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+  } else {
+    bodyHtml = '';
+  }
+
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:620px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">Manage users</div>
+          <div class="siteloc" style="margin-top:2px;">Approve accounts, set roles, and assign engineers to sites</div>
+        </div>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+      <div class="um-list" style="max-height:520px;overflow-y:auto;">
+        ${bodyHtml}
+      </div>
+    </div>
+  </div>`;
+}
+
+function wireUserManagerModal(){
+  if(!state.userManagerData) return;
+
+  modalRoot.querySelectorAll('[data-approve-user]').forEach(cb=>{
+    cb.addEventListener('change', async ()=>{
+      const userId = cb.getAttribute('data-approve-user');
+      const approved = cb.checked;
+      cb.disabled = true;
+      const res = await setUserApproved(userId, approved);
+      if(res.error){ showToast(res.error, true); cb.checked = !approved; cb.disabled=false; return; }
+      const p = state.userManagerData.profiles.find(p=>p.id===userId);
+      if(p) p.approved = approved;
+      showToast(approved ? 'User approved.' : 'User approval revoked.');
+      renderModal();
+    });
+  });
+
+  modalRoot.querySelectorAll('[data-role-user]').forEach(sel=>{
+    sel.addEventListener('change', async ()=>{
+      const userId = sel.getAttribute('data-role-user');
+      const newRole = sel.value;
+      sel.disabled = true;
+      const res = await setUserRole(userId, newRole);
+      sel.disabled = false;
+      if(res.error){ showToast(res.error, true); renderModal(); return; }
+      const p = state.userManagerData.profiles.find(p=>p.id===userId);
+      if(p) p.role = newRole;
+      showToast(`Role updated to ${newRole}.`);
+      renderModal();
+    });
+  });
+
+  modalRoot.querySelectorAll('[data-assign-site]').forEach(cb=>{
+    cb.addEventListener('change', async ()=>{
+      const userId = cb.getAttribute('data-assign-user');
+      const siteId = cb.getAttribute('data-assign-site');
+      const assign = cb.checked;
+      cb.disabled = true;
+      const res = await setSiteAssignment(userId, siteId, assign);
+      cb.disabled = false;
+      if(res.error){ showToast(res.error, true); cb.checked = !assign; return; }
+      if(assign) state.userManagerData.assignments.push({ user_id:userId, site_id:siteId });
+      else state.userManagerData.assignments = state.userManagerData.assignments.filter(a=>!(a.user_id===userId && a.site_id===siteId));
+      renderModal();
+    });
+  });
+}
+
+/* ---------------------------------------------------------------
+   ADD SITE MODAL (admin only)
 --------------------------------------------------------------- */
 function renderAddSiteModal(){
   return `
@@ -1276,7 +1448,7 @@ function renderAddSiteModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT SITE MODAL (managers + admins) — name/location/tier/PUE
+   EDIT SITE MODAL (assigned engineers + admins) — name/location/tier/PUE
 --------------------------------------------------------------- */
 function renderEditSiteModal(){
   const site = SITES.find(s=>s.id===state.editSiteId);
@@ -1325,7 +1497,7 @@ function renderEditSiteModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD RACK MODAL (managers + admins) — add a single rack to any row
+   ADD RACK MODAL (assigned engineers + admins) — add a single rack to any row
 --------------------------------------------------------------- */
 function renderAddRackModal(){
   const site = SITES.find(s=>s.id===state.addRackSiteId);
@@ -1549,25 +1721,67 @@ function renderRoot(){
     wireAuthForm();
     return;
   }
+  if(LIVE && state.user && !state.approved){
+    document.getElementById('topbar').style.display = 'none';
+    rootEl.innerHTML = renderPendingApproval();
+    document.getElementById('pendingSignOut').addEventListener('click', signOut);
+    document.getElementById('pendingRecheck').addEventListener('click', recheckApproval);
+    return;
+  }
   document.getElementById('topbar').style.display = 'flex';
   renderTopbarMeta();
   render();
 }
 
+function renderPendingApproval(){
+  return `
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand"><div class="mark">DC</div>Facility Ops</div>
+      <div class="sitename" style="font-size:18px;margin-top:10px;">Waiting for approval</div>
+      <p class="faint" style="font-size:13.5px;line-height:1.5;margin:10px 0 18px;">
+        Your account (${esc(state.user.email)}) has been created but hasn't been approved yet.
+        An admin needs to approve it before you can see any sites or devices. Check back later,
+        or press "Check again" if you've just been approved.
+      </p>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-primary" id="pendingRecheck">Check again</button>
+        <button class="btn" id="pendingSignOut">Sign out</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function openUserManager(){
+  state.modalType = 'userManager';
+  state.userManagerLoading = true;
+  state.userManagerError = null;
+  renderModal();
+  const res = await fetchUserManagerData();
+  state.userManagerLoading = false;
+  if(res.error){ state.userManagerError = res.error; renderModal(); return; }
+  state.userManagerData = { profiles: res.profiles, assignments: res.assignments };
+  renderModal();
+}
+
 function renderTopbarMeta(){
   if(LIVE){
+    const roleCssClass = state.role==='engineer' ? 'manager' : state.role; // reuse existing purple styling
     topbarMeta.innerHTML = `
-      <span class="role-tag ${state.role}">${state.role}</span>
+      <span class="role-tag ${roleCssClass}">${state.role}</span>
       <span>${esc(state.user.email)}</span>
+      ${isAdmin() ? `<button class="editlink" id="openUserManager" style="margin-left:8px;">Manage users</button>` : ''}
       <button class="signout-link" id="signOutBtn">Sign out</button>
     `;
     document.getElementById('signOutBtn').addEventListener('click', signOut);
+    const umBtn = document.getElementById('openUserManager');
+    if(umBtn) umBtn.addEventListener('click', openUserManager);
   } else {
     topbarMeta.innerHTML = `
       <span class="demo-switch">Demo mode — viewing as
         <select id="demoRoleSelect">
           <option value="admin" ${state.role==='admin'?'selected':''}>Admin</option>
-          <option value="manager" ${state.role==='manager'?'selected':''}>Manager</option>
+          <option value="engineer" ${state.role==='engineer'?'selected':''}>Engineer</option>
           <option value="technician" ${state.role==='technician'?'selected':''}>Technician</option>
         </select>
       </span>
@@ -1768,6 +1982,13 @@ function renderModal(){
     document.getElementById('cancelEditDevice').addEventListener('click', closeModal);
     document.getElementById('editDeviceForm').addEventListener('submit', handleEditDeviceSubmit);
   }
+
+  if(state.modalType==='userManager'){
+    modalRoot.innerHTML = renderUserManagerModal();
+    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    wireUserManagerModal();
+  }
 }
 
 function closeModal(){
@@ -1780,6 +2001,7 @@ function closeModal(){
   state.editSiteId=null; state.editSiteError=null;
   state.addRackError=null;
   state.editDeviceId=null; state.editDeviceRackId=null; state.editDeviceSiteId=null; state.editDeviceError=null;
+  state.userManagerData=null; state.userManagerError=null; state.userManagerLoading=false;
   renderModal();
 }
 
