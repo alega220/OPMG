@@ -1795,6 +1795,7 @@ function render(){
   else if(state.view==='analysis') rootEl.innerHTML = renderAnalysis();
   else rootEl.innerHTML = renderSite(SITES.find(s=>s.id===state.siteId));
   attachHandlers();
+  wireFloorDnD();
   renderModal();
   renderHistoryOverlay();
   updateNavActive();
@@ -2143,6 +2144,42 @@ async function handleAddRackSubmit(e){
   closeModal();
   showToast(`${rackId} added to Row ${row}.`);
   render();
+}
+
+function wireFloorDnD(){
+  if(!(state.view==='site' && state.siteSub==='floor')) return;
+  const site = SITES.find(s=>s.id===state.siteId);
+  if(!site || !isEngineer()) return;
+  let dragId = null;
+  rootEl.querySelectorAll('.racktile[draggable="true"]').forEach(t=>{
+    t.addEventListener('dragstart', (e)=>{
+      dragId = t.getAttribute('data-rack-id');
+      if(e.dataTransfer){ e.dataTransfer.effectAllowed = 'move'; try{ e.dataTransfer.setData('text/plain', dragId); }catch(err){} }
+      t.style.opacity = '0.4';
+    });
+    t.addEventListener('dragend', ()=>{ t.style.opacity=''; });
+  });
+  rootEl.querySelectorAll('.racktiles').forEach(container=>{
+    container.addEventListener('dragover', (e)=>{
+      e.preventDefault();
+      if(e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      container.style.outline = '2px dashed #6C4EE3';
+      container.style.outlineOffset = '2px';
+    });
+    container.addEventListener('dragleave', ()=>{ container.style.outline=''; container.style.outlineOffset=''; });
+    container.addEventListener('drop', async (e)=>{
+      e.preventDefault();
+      container.style.outline=''; container.style.outlineOffset='';
+      if(!dragId) return;
+      const draggedId = dragId; dragId = null;
+      const targetRow = container.getAttribute('data-row');
+      const overTile = document.elementFromPoint(e.clientX, e.clientY)?.closest('.racktile');
+      const beforeId = (overTile && overTile.getAttribute('data-rack-id')!==draggedId) ? overTile.getAttribute('data-rack-id') : null;
+      const res = await moveRack(site.id, draggedId, targetRow, beforeId);
+      if(res.error){ showToast(res.error, true); return; }
+      render();
+    });
+  });
 }
 
 function attachHandlers(){
