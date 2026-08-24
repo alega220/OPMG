@@ -40,11 +40,13 @@ const PEOPLE = [
   "O. Tarek — Vendor Contractor","N. Adel — Facilities",
 ];
 const SITE_DEFS = [
-  {id:"b90",name:"B90",location:"Cairo — Bldg 90",tier:"Tier III",rackCount:195,caps:[5,8,10,15]},
-  {id:"a12",name:"A12",location:"Cairo — Bldg 12",tier:"Tier III",rackCount:96,caps:[5,8,10]},
-  {id:"c77",name:"C77",location:"Alexandria — Bldg 77",tier:"Tier II",rackCount:60,caps:[4,6,8]},
-  {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20]},
+  {id:"b90",name:"B90",location:"Cairo — Bldg 90",tier:"Tier III",rackCount:195,caps:[5,8,10,15],category:"colocation"},
+  {id:"a12",name:"A12",location:"Cairo — Bldg 12",tier:"Tier III",rackCount:96,caps:[5,8,10],category:"colocation"},
+  {id:"c77",name:"C77",location:"Alexandria — Bldg 77",tier:"Tier II",rackCount:60,caps:[4,6,8],category:"colocation"},
+  {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20],category:"colocation"},
+  {id:"auto-we",name:"Auto WE",location:"",tier:"Tier II",rackCount:12,caps:[5,8,10],category:"inhouse"},
 ];
+const CATEGORY_LABELS = { colocation:'Colocation sites', inhouse:'Inhouse sites' };
 
 function genSerial(rng){
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -167,7 +169,7 @@ function showToast(msg, isError){
 let SITES = [];
 const state = {
   ready:false, user:null, role: LIVE ? null : 'engineer', approved: LIVE ? false : true,
-  view:'dashboard', siteId:null, siteSub:'floor', search:'', sort:'name',
+  view:'categories', categoryId:null, siteId:null, siteSub:'floor', search:'', sort:'name',
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
   editingCapacity:false, capacityError:null,
@@ -228,7 +230,7 @@ async function loadData(){
       recomputeRack(rack);
       return rack;
     });
-    const site = { id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue), racks };
+    const site = { id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue), category:s.category||'colocation', racks };
     recomputeSite(site);
     return site;
   });
@@ -240,7 +242,7 @@ async function seedDemoDataToSupabase(){
   showToast('Seeding demo data — this can take a minute…');
   const demo = SITE_DEFS.map(generateSite);
   for(const site of demo){
-    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue });
+    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue, category:site.category||'colocation' });
     const rackRows = site.racks.map(r=>({ id:r.id, site_id:site.id, row_label:r.row, capacity_kva:r.capacityKva, actual_kva:r.actualKva, position:r.position }));
     for(let i=0;i<rackRows.length;i+=500) await sb.from('racks').upsert(rackRows.slice(i,i+500));
     let deviceRows = [];
@@ -468,7 +470,7 @@ function slugify(name){
   return id;
 }
 
-async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva }){
+async function createSite({ name, location, tier, pue, category, rackCount, rowCount, defaultCapacityKva }){
   const id = slugify(name);
   const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
   const rackDefs = [];
@@ -479,7 +481,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
   }
 
   if(LIVE){
-    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue });
+    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue, category });
     if(e1) return { error: e1.message };
     const rackRows = rackDefs.map(r=>({ id:r.id, site_id:id, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0 }));
     for(let i=0;i<rackRows.length;i+=500){
@@ -490,7 +492,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
 
   const racks = rackDefs.map(r=>({ ...r, devices:[], history:[] }));
   racks.forEach(recomputeRack);
-  const site = { id, name, location, tier, pue, racks };
+  const site = { id, name, location, tier, pue, category, racks };
   recomputeSite(site);
   SITES.push(site);
   return { ok:true, site };
@@ -525,13 +527,13 @@ async function removeSite(siteId){
   return { ok:true };
 }
 
-async function updateSiteInfo(siteId, { name, location, tier, pue }){
+async function updateSiteInfo(siteId, { name, location, tier, pue, category }){
   const site = SITES.find(s=>s.id===siteId);
   if(LIVE){
-    const { error } = await sb.from('sites').update({ name, location, tier, pue }).eq('id', siteId);
+    const { error } = await sb.from('sites').update({ name, location, tier, pue, category }).eq('id', siteId);
     if(error) return { error: error.message };
   }
-  site.name = name; site.location = location; site.tier = tier; site.pue = pue;
+  site.name = name; site.location = location; site.tier = tier; site.pue = pue; site.category = category;
   recomputeSite(site);
   return { ok:true };
 }
@@ -634,7 +636,7 @@ async function signUp(email, password){
 }
 async function signOut(){
   await sb.auth.signOut();
-  state.user=null; state.role=null; state.approved=false; SITES=[]; state.view='dashboard'; state.siteId=null;
+  state.user=null; state.role=null; state.approved=false; SITES=[]; state.view='categories'; state.categoryId=null; state.siteId=null;
   renderRoot();
 }
 
@@ -668,39 +670,81 @@ function renderLogin(){
 }
 
 /* ---------------------------------------------------------------
-   DASHBOARD
+   SITE CATEGORIES + DASHBOARD
 --------------------------------------------------------------- */
-function renderDashboard(){
-  const racks = SITES.reduce((s,x)=>s+x.racks.length,0);
-  const it = SITES.reduce((s,x)=>s+x.itLoadKva,0);
-  const util = SITES.reduce((s,x)=>s+x.utilityLoadKva,0);
-  const cap = SITES.reduce((s,x)=>s+x.totalCapacityKva,0);
+function renderCategories(){
+  if(SITES.length===0 && LIVE){
+    return `
+      <div class="h1">Colocation facility operations</div>
+      <div class="muted" style="font-size:13px;margin:8px 0 20px;">No sites yet in this Supabase project.</div>
+      ${isAdmin() ? `<button class="btn btn-primary" id="seedBtn">Seed demo data (5 sites)</button>` :
+        `<div class="faint" style="font-size:13px;">Ask an admin to seed initial site data.</div>`}
+    `;
+  }
+
+  const racksTotal = SITES.reduce((s,x)=>s+x.racks.length,0);
+  const itTotal = SITES.reduce((s,x)=>s+x.itLoadKva,0);
+  const capTotal = SITES.reduce((s,x)=>s+x.totalCapacityKva,0);
+  const pctTotal = capTotal>0 ? itTotal/capTotal : 0;
+  const cats = ['colocation','inhouse'];
+
+  return `
+    <div class="h1">Colocation facility operations</div>
+    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racksTotal} racks · portfolio utilization ${fmtPct(pctTotal)}</div>
+
+    <div class="sitegrid">
+      ${cats.map(cat=>{
+        const catSites = SITES.filter(s=>(s.category||'colocation')===cat);
+        const catRacks = catSites.reduce((s,x)=>s+x.racks.length,0);
+        const catIt = catSites.reduce((s,x)=>s+x.itLoadKva,0);
+        const catCap = catSites.reduce((s,x)=>s+x.totalCapacityKva,0);
+        const catPct = catCap>0 ? catIt/catCap : 0;
+        return `
+        <div class="card sitecard" data-open-category="${cat}">
+          <div class="sitecard-top">
+            <div><div class="sitename">${CATEGORY_LABELS[cat]}</div><div class="siteloc">${catSites.length} site${catSites.length===1?'':'s'}</div></div>
+            <span class="badge ${statusColor(catPct)}">${statusLabel(catPct)}</span>
+          </div>
+          <div class="gaugewrap">
+            ${gaugeSvg(catPct,62)}
+            <div class="statgrid2">
+              <div><div class="stat-label">Sites</div><div class="stat-value">${catSites.length}</div></div>
+              <div><div class="stat-label">Racks</div><div class="stat-value">${catRacks}</div></div>
+              <div><div class="stat-label">IT load</div><div class="stat-value">${fmtKva(catIt,0)}</div></div>
+              <div><div class="stat-label">Capacity</div><div class="stat-value">${fmtKva(catCap,0)}</div></div>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderCategoryView(categoryId){
+  const catSites = SITES.filter(s=>(s.category||'colocation')===categoryId);
+  const racks = catSites.reduce((s,x)=>s+x.racks.length,0);
+  const it = catSites.reduce((s,x)=>s+x.itLoadKva,0);
+  const util = catSites.reduce((s,x)=>s+x.utilityLoadKva,0);
+  const cap = catSites.reduce((s,x)=>s+x.totalCapacityKva,0);
   const pct = cap>0 ? it/cap : 0;
 
   const flat=[];
-  SITES.forEach(s=>s.racks.forEach(r=>{ const p=r.capacityKva>0 ? r.actualKva/r.capacityKva : 0; if(p>=0.75) flat.push({site:s.name,siteId:s.id,rack:r.id,pct:p}); }));
+  catSites.forEach(s=>s.racks.forEach(r=>{ const p=r.capacityKva>0 ? r.actualKva/r.capacityKva : 0; if(p>=0.75) flat.push({site:s.name,siteId:s.id,rack:r.id,pct:p}); }));
   flat.sort((a,b)=>b.pct-a.pct);
   const top = flat.slice(0,6);
   const critCount = flat.filter(f=>f.pct>=0.9).length;
   const warnCount = flat.filter(f=>f.pct>=0.75 && f.pct<0.9).length;
 
-  if(SITES.length===0 && LIVE){
-    return `
-      <div class="h1">Colocation facility operations</div>
-      <div class="muted" style="font-size:13px;margin:8px 0 20px;">No sites yet in this Supabase project.</div>
-      ${isAdmin() ? `<button class="btn btn-primary" id="seedBtn">Seed demo data (4 sites)</button>` :
-        `<div class="faint" style="font-size:13px;">Ask an admin to seed initial site data.</div>`}
-    `;
-  }
-
   return `
+    <button class="backlink" data-back-to-categories="1">&larr; All categories</button>
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-      <div class="h1">Colocation facility operations</div>
+      <div class="h1">${CATEGORY_LABELS[categoryId]}</div>
       ${isAdmin() ? `<button class="btn btn-primary" id="openAddSite">+ Add site</button>` : ''}
     </div>
-    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racks} racks · portfolio utilization ${fmtPct(pct)}</div>
+    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${catSites.length} sites · ${racks} racks · utilization ${fmtPct(pct)}</div>
 
-    <div class="card kpirow">
+    <div class="card kpirow" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));">
+      <div><div class="stat-label">Sites</div><div class="stat-value">${catSites.length}</div></div>
       <div><div class="stat-label">Total racks</div><div class="stat-value">${racks}</div></div>
       <div><div class="stat-label">Total IT load</div><div class="stat-value">${fmtKva(it,0)}</div></div>
       <div><div class="stat-label">Total utility load</div><div class="stat-value">${fmtKva(util,0)}</div></div>
@@ -721,8 +765,9 @@ function renderDashboard(){
       </div>
     </div>` : ''}
 
+    ${catSites.length===0 ? `<div class="card" style="padding:24px;text-align:center;color:var(--text3);font-size:13px;">No sites in this category yet.</div>` : `
     <div class="sitegrid">
-      ${SITES.map(s=>`
+      ${catSites.map(s=>`
         <div class="card sitecard" data-open-site="${s.id}">
           <div class="sitecard-top">
             <div><div class="sitename">${s.name}</div><div class="siteloc">${esc(s.location)}</div></div>
@@ -747,7 +792,7 @@ function renderDashboard(){
           </div>
         </div>
       `).join('')}
-    </div>
+    </div>`}
   `;
 }
 
@@ -1414,6 +1459,13 @@ function renderAddSiteModal(){
             </select>
           </div>
         </div>
+        <div class="field">
+          <label>Category</label>
+          <select id="sCategory">
+            <option value="colocation" ${state.categoryId!=='inhouse'?'selected':''}>Colocation site</option>
+            <option value="inhouse" ${state.categoryId==='inhouse'?'selected':''}>Inhouse site</option>
+          </select>
+        </div>
 
         <div class="field-row">
           <div class="field">
@@ -1481,6 +1533,13 @@ function renderEditSiteModal(){
               ${['Tier I','Tier II','Tier III','Tier IV'].map(t=>`<option ${site.tier===t?'selected':''}>${t}</option>`).join('')}
             </select>
           </div>
+        </div>
+        <div class="field">
+          <label>Category</label>
+          <select id="eCategory">
+            <option value="colocation" ${(site.category||'colocation')==='colocation'?'selected':''}>Colocation site</option>
+            <option value="inhouse" ${site.category==='inhouse'?'selected':''}>Inhouse site</option>
+          </select>
         </div>
         <div class="field">
           <label>PUE</label>
@@ -1593,17 +1652,6 @@ function renderHistoryModal(rack){
 /* ---------------------------------------------------------------
    ANALYSIS TAB
 --------------------------------------------------------------- */
-const COVE = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
-
-function deviceMixCounts(){
-  const map = {};
-  SITES.forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.model]=(map[d.model]||0)+1; })));
-  const entries = Object.entries(map).sort((a,b)=>b[1]-a[1]);
-  const top = entries.slice(0,7);
-  const restSum = entries.slice(7).reduce((s,[,c])=>s+c,0);
-  if(restSum>0) top.push(['Other', restSum]);
-  return top;
-}
 function ownerPowerTotals(){
   const map = {};
   SITES.forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.authorizedPerson]=(map[d.authorizedPerson]||0)+d.datasheetKva; })));
@@ -1652,17 +1700,10 @@ function renderAnalysis(){
       </div>
     </div>
 
-    <div class="agrid">
-      <div class="card achart-card">
-        <div class="achart-title">Device mix (portfolio-wide)</div>
-        <div style="position:relative;height:220px;"><canvas id="chartDeviceMix" role="img" aria-label="Donut chart of device counts by model across all sites"></canvas></div>
-        <div class="legend-row" id="deviceMixLegend"></div>
-      </div>
-      <div class="card achart-card">
-        <div class="achart-title">Top authorized owners by device rating</div>
-        <div class="ownerlist">
-          ${owners.map(([name,kw])=>`<div class="ownerrow"><span>${esc(name)}</span><span class="mono" style="color:var(--purple-dark);font-weight:600;">${kw.toFixed(1)} kVA</span></div>`).join('')}
-        </div>
+    <div class="card achart-card">
+      <div class="achart-title">Top authorized owners by device rating</div>
+      <div class="ownerlist">
+        ${owners.map(([name,kw])=>`<div class="ownerrow"><span>${esc(name)}</span><span class="mono" style="color:var(--purple-dark);font-weight:600;">${kw.toFixed(1)} kVA</span></div>`).join('')}
       </div>
     </div>
   `;
@@ -1691,18 +1732,6 @@ function drawAnalysisCharts(){
       options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } },
         scales:{ y:{ beginAtZero:true, grid:{ color:'#EEF0F3' }, ticks:{ color:'#8A93A3', stepSize:Math.max(1, Math.ceil(Math.max(...b,1)/5)) } }, x:{ grid:{ display:false }, ticks:{ color:'#5B6472' } } } }
     });
-  }
-  const mixEl = document.getElementById('chartDeviceMix');
-  if(mixEl){
-    const mix = deviceMixCounts();
-    const total = mix.reduce((s,[,c])=>s+c,0) || 1;
-    chartInstances.mix = new Chart(mixEl, {
-      type:'doughnut',
-      data:{ labels: mix.map(([n])=>n), datasets:[{ data: mix.map(([,c])=>c), backgroundColor: mix.map((_,i)=>COVE[i%COVE.length]), borderColor:'#fff', borderWidth:2 }] },
-      options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } } }
-    });
-    const legendEl = document.getElementById('deviceMixLegend');
-    if(legendEl) legendEl.innerHTML = mix.map(([n,c],i)=>`<span><span class="legend-sw" style="background:${COVE[i%COVE.length]};"></span>${esc(n)} ${Math.round(c/total*100)}%</span>`).join('');
   }
 }
 
@@ -1791,7 +1820,8 @@ function renderTopbarMeta(){
 }
 
 function render(){
-  if(state.view==='dashboard') rootEl.innerHTML = renderDashboard();
+  if(state.view==='categories') rootEl.innerHTML = renderCategories();
+  else if(state.view==='category') rootEl.innerHTML = renderCategoryView(state.categoryId);
   else if(state.view==='analysis') rootEl.innerHTML = renderAnalysis();
   else rootEl.innerHTML = renderSite(SITES.find(s=>s.id===state.siteId));
   attachHandlers();
@@ -1802,7 +1832,7 @@ function render(){
   if(state.view==='analysis') requestAnimationFrame(drawAnalysisCharts);
 }
 function updateNavActive(){
-  document.getElementById('navSites').classList.toggle('active', state.view==='dashboard' || state.view==='site');
+  document.getElementById('navSites').classList.toggle('active', state.view==='categories' || state.view==='category' || state.view==='site');
   document.getElementById('navAnalysis').classList.toggle('active', state.view==='analysis');
 }
 
@@ -2090,6 +2120,7 @@ async function handleAddSiteSubmit(e){
   const name = document.getElementById('sName').value.trim();
   const location = document.getElementById('sLocation').value.trim();
   const tier = document.getElementById('sTier').value;
+  const category = document.getElementById('sCategory').value;
   const rackCount = parseInt(document.getElementById('sRackCount').value, 10);
   const rowCount = parseInt(document.getElementById('sRowCount').value, 10);
   const defaultCapacityKva = parseFloat(document.getElementById('sCapacity').value);
@@ -2101,11 +2132,12 @@ async function handleAddSiteSubmit(e){
   if(isNaN(defaultCapacityKva) || defaultCapacityKva<=0){ state.addSiteError='Enter a valid default rack capacity greater than 0.'; renderModal(); return; }
   if(isNaN(pue) || pue<1){ state.addSiteError='PUE must be 1 or greater.'; renderModal(); return; }
 
-  const res = await createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva });
+  const res = await createSite({ name, location, tier, pue, category, rackCount, rowCount, defaultCapacityKva });
   if(res.error){ state.addSiteError = res.error; renderModal(); return; }
 
   closeModal();
   showToast(`${name} created with ${rackCount} racks.`);
+  state.view='category'; state.categoryId=category;
   render();
 }
 
@@ -2114,16 +2146,18 @@ async function handleEditSiteSubmit(e){
   const name = document.getElementById('eName').value.trim();
   const location = document.getElementById('eLocation').value.trim();
   const tier = document.getElementById('eTier').value;
+  const category = document.getElementById('eCategory').value;
   const pue = parseFloat(document.getElementById('ePue').value);
 
   if(!name){ state.editSiteError='Enter a site name.'; renderModal(); return; }
   if(isNaN(pue) || pue<1){ state.editSiteError='PUE must be 1 or greater.'; renderModal(); return; }
 
-  const res = await updateSiteInfo(state.editSiteId, { name, location, tier, pue });
+  const res = await updateSiteInfo(state.editSiteId, { name, location, tier, pue, category });
   if(res.error){ state.editSiteError = res.error; renderModal(); return; }
 
   closeModal();
   showToast(`${name} updated.`);
+  state.categoryId = category;
   render();
 }
 
@@ -2183,11 +2217,22 @@ function wireFloorDnD(){
 }
 
 function attachHandlers(){
+  rootEl.querySelectorAll('[data-open-category]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.view='category'; state.categoryId=el.getAttribute('data-open-category'); render(); });
+  });
+  rootEl.querySelectorAll('[data-back-to-categories]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.view='categories'; state.categoryId=null; render(); });
+  });
   rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
-    el.addEventListener('click', ()=>{ state.view='site'; state.siteId=el.getAttribute('data-open-site'); state.search=''; state.sort='name'; state.siteSub='floor'; render(); });
+    el.addEventListener('click', ()=>{
+      const siteId = el.getAttribute('data-open-site');
+      const site = SITES.find(s=>s.id===siteId);
+      state.view='site'; state.siteId=siteId; state.categoryId = site ? (site.category||'colocation') : state.categoryId;
+      state.search=''; state.sort='name'; state.siteSub='floor'; render();
+    });
   });
   rootEl.querySelectorAll('[data-back]').forEach(el=>{
-    el.addEventListener('click', ()=>{ state.view='dashboard'; state.siteId=null; render(); });
+    el.addEventListener('click', ()=>{ state.view = state.categoryId ? 'category' : 'categories'; state.siteId=null; render(); });
   });
   rootEl.querySelectorAll('[data-sub]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.siteSub = el.getAttribute('data-sub'); render(); });
@@ -2231,7 +2276,7 @@ function attachHandlers(){
       const res = await removeSite(id);
       if(res.error){ showToast(res.error, true); return; }
       showToast(`${name} removed.`);
-      if(state.siteId===id){ state.view='dashboard'; state.siteId=null; }
+      if(state.siteId===id){ state.view = state.categoryId ? 'category' : 'categories'; state.siteId=null; }
       render();
     });
   });
@@ -2255,7 +2300,7 @@ function wireAuthForm(){
   });
 }
 
-document.getElementById('navSites').addEventListener('click', ()=>{ state.view='dashboard'; state.siteId=null; render(); });
+document.getElementById('navSites').addEventListener('click', ()=>{ state.view='categories'; state.categoryId=null; state.siteId=null; render(); });
 document.getElementById('navAnalysis').addEventListener('click', ()=>{ state.view='analysis'; render(); });
 
 /* ---------------------------------------------------------------
