@@ -180,6 +180,7 @@ const state = {
   addSiteError:null,
   editSiteId:null, editSiteError:null,
   addRackSiteId:null, addRackError:null,
+  addFloorSiteId:null, addFloorError:null,
   editDeviceId:null, editDeviceRackId:null, editDeviceSiteId:null, editDeviceError:null,
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
@@ -531,7 +532,7 @@ async function addRackToSite(siteId, { rackId, row, capacityKva, circuitBreaker,
   return { ok:true, rack };
 }
 
-async function addFloorToSite(siteId, name){
+async function addFloorToSite(siteId, { name, rackCount, rowCount, defaultCapacityKva }){
   const site = SITES.find(s=>s.id===siteId);
   if(!site) return { error:'Site not found.' };
   if(site.floors.some(f=>f.name.toLowerCase()===name.toLowerCase())) return { error:`Floor "${name}" already exists.` };
@@ -546,8 +547,38 @@ async function addFloorToSite(siteId, name){
     floorId = `demo-floor-${Date.now()}`;
   }
   const floor = { id:floorId, name, position };
+
+  // continue row lettering from whatever's already used anywhere on this site,
+  // so rack names stay globally unique across floors (e.g. floor 1 = A-F, floor 2 = G-J)
+  const usedLetters = new Set(site.racks.map(r=>(r.row||'').toUpperCase().charAt(0)).filter(Boolean));
+  let startCode = 65;
+  while(usedLetters.has(String.fromCharCode(startCode))) startCode++;
+
+  const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
+  const rackDefs = [];
+  for(let i=1;i<=rackCount;i++){
+    const row = String.fromCharCode(startCode + Math.floor((i-1)/racksPerRow));
+    const rowIndex = (i-1) % racksPerRow + 1;
+    rackDefs.push({ id:`${site.id.toUpperCase()}-${row}${String(rowIndex).padStart(2,'0')}`, row, position:rowIndex-1, capacityKva:defaultCapacityKva, actualKva:0, circuitBreaker:null, customer:null, activationDate:null, floorId });
+  }
+  if(rackDefs.some(r=>SITES.some(s=>s.racks.some(er=>er.id===r.id)))){
+    return { error:'Generated rack names collide with existing racks — try a different rack/row count.' };
+  }
+
+  if(LIVE){
+    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:siteId, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
+    for(let i=0;i<rackRows.length;i+=500){
+      const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
+      if(e2) return { error: e2.message };
+    }
+  }
+
+  const racks = rackDefs.map(r=>({ ...r, devices:[], history:[] }));
+  racks.forEach(recomputeRack);
   site.floors.push(floor);
   site.floors.sort((a,b)=>a.position-b.position);
+  site.racks.push(...racks);
+  recomputeSite(site);
   return { ok:true, floor };
 }
 
@@ -1509,6 +1540,56 @@ function renderAddSiteModal(){
 /* ---------------------------------------------------------------
    EDIT SITE MODAL (assigned engineers + admins) — name/location/tier/PUE
 --------------------------------------------------------------- */
+function renderAddFloorModal(){
+  const site = SITES.find(s=>s.id===state.addFloorSiteId);
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">Add floor</div>
+          <div class="siteloc" style="margin-top:2px;">Define the rack layout for a new floor at ${esc(site.name)}</div>
+        </div>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+
+      ${state.addFloorError ? `<div class="form-error">${esc(state.addFloorError)}</div>` : ''}
+
+      <form id="addFloorForm">
+        <div class="field">
+          <label>Floor name</label>
+          <input id="fFloorName" placeholder="e.g. Floor 2, Basement" autocomplete="off"/>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Number of racks</label>
+            <input id="fRackCount" type="number" min="1" max="2000" step="1" value="40"/>
+          </div>
+          <div class="field">
+            <label>Number of rows</label>
+            <input id="fRowCount" type="number" min="1" max="200" step="1" value="4"/>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Maximum power per rack (kVA)</label>
+          <input id="fCapacity" type="number" min="0.5" step="0.5" value="10"/>
+        </div>
+        <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">Row letters continue on from this site's existing rows, so rack names stay unique across floors. Each rack's max power can still be adjusted individually afterward.</div>
+
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;">
+          <button type="button" class="btn" id="cancelAddFloor">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create floor</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
+   EDIT SITE MODAL (assigned engineers + admins) — name/location/tier/PUE
+--------------------------------------------------------------- */
 function renderEditSiteModal(){
   const site = SITES.find(s=>s.id===state.editSiteId);
   return `
@@ -2053,6 +2134,15 @@ function renderModal(){
     return;
   }
 
+  if(state.modalType==='addFloor'){
+    modalRoot.innerHTML = renderAddFloorModal();
+    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    document.getElementById('cancelAddFloor').addEventListener('click', closeModal);
+    document.getElementById('addFloorForm').addEventListener('submit', handleAddFloorSubmit);
+    return;
+  }
+
   if(state.modalType==='editDevice'){
     modalRoot.innerHTML = renderEditDeviceModal();
     document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
@@ -2078,6 +2168,7 @@ function closeModal(){
   state.editingRackName=false; state.rackNameError=null;
   state.editSiteId=null; state.editSiteError=null;
   state.addRackError=null;
+  state.addFloorSiteId=null; state.addFloorError=null;
   state.editDeviceId=null; state.editDeviceRackId=null; state.editDeviceSiteId=null; state.editDeviceError=null;
   state.userManagerData=null; state.userManagerError=null; state.userManagerLoading=false;
   renderModal();
@@ -2225,6 +2316,28 @@ async function handleAddRackSubmit(e){
   render();
 }
 
+async function handleAddFloorSubmit(e){
+  e.preventDefault();
+  const name = document.getElementById('fFloorName').value.trim();
+  const rackCount = parseInt(document.getElementById('fRackCount').value, 10);
+  const rowCount = parseInt(document.getElementById('fRowCount').value, 10);
+  const defaultCapacityKva = parseFloat(document.getElementById('fCapacity').value);
+
+  if(!name){ state.addFloorError='Enter a floor name.'; renderModal(); return; }
+  if(!Number.isInteger(rackCount) || rackCount<1){ state.addFloorError='Enter a valid number of racks.'; renderModal(); return; }
+  if(!Number.isInteger(rowCount) || rowCount<1){ state.addFloorError='Enter a valid number of rows.'; renderModal(); return; }
+  if(rowCount > 26){ state.addFloorError='Max 26 rows per floor (one per letter A–Z).'; renderModal(); return; }
+  if(isNaN(defaultCapacityKva) || defaultCapacityKva<=0){ state.addFloorError='Enter a valid max power greater than 0.'; renderModal(); return; }
+
+  const res = await addFloorToSite(state.addFloorSiteId, { name, rackCount, rowCount, defaultCapacityKva });
+  if(res.error){ state.addFloorError = res.error; renderModal(); return; }
+
+  closeModal();
+  state.selectedFloorId = res.floor.id;
+  showToast(`${name} added with ${rackCount} racks.`);
+  render();
+}
+
 function attachHandlers(){
   rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.view='site'; state.siteId=el.getAttribute('data-open-site'); state.search=''; state.sort='name'; state.siteSub='floor'; state.selectedFloorId=null; render(); });
@@ -2239,14 +2352,11 @@ function attachHandlers(){
     el.addEventListener('click', ()=>{ state.selectedFloorId = el.getAttribute('data-floor'); render(); });
   });
   const addFloorBtn = document.getElementById('addFloorBtn');
-  if(addFloorBtn) addFloorBtn.addEventListener('click', async ()=>{
-    const name = prompt('Name this floor (e.g. "Floor 2", "Basement"):');
-    if(!name || !name.trim()) return;
-    const res = await addFloorToSite(state.siteId, name.trim());
-    if(res.error){ showToast(res.error, true); return; }
-    state.selectedFloorId = res.floor.id;
-    showToast(`${name.trim()} added.`);
-    render();
+  if(addFloorBtn) addFloorBtn.addEventListener('click', ()=>{
+    state.addFloorSiteId = state.siteId;
+    state.addFloorError = null;
+    state.modalType = 'addFloor';
+    renderModal();
   });
   rootEl.querySelectorAll('[data-open-rack]').forEach(el=>{
     el.addEventListener('click', ()=>{
