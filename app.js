@@ -990,6 +990,159 @@ async function updateSiteField(siteId, field, value){
   return { ok:true };
 }
 
+/* ---------------------------------------------------------------
+   EXCEL EXPORT — client-side, uses SheetJS (lazy-loaded)
+--------------------------------------------------------------- */
+async function exportPortfolioToExcel(){
+  let XLSX;
+  try {
+    XLSX = await window.loadSheetJS();
+  } catch(e){
+    showToast('Could not load the Excel library — check your internet connection.', true);
+    return;
+  }
+
+  const sites = visibleSites();
+  if(sites.length === 0){ showToast('No sites to export in this category.', true); return; }
+
+  const wb = XLSX.utils.book_new();
+
+  /* -------- Compute per-site stats -------- */
+  function siteStats(site){
+    const totalCapacityKva = site.racks.reduce((s,r) => s + Number(r.capacityKva || 0), 0);
+    const currentItLoadKva = site.racks.reduce((s,r) => s + Number(r.actualKva || 0), 0);
+    const totalRacks = site.racks.length;
+    const utilizedRacks = site.racks.filter(r => r.devices.length > 0).length;
+    const emptyRacks = totalRacks - utilizedRacks;
+    const avgRackKw = totalRacks > 0 ? totalCapacityKva / totalRacks : 0;
+    return { totalCapacityKva, currentItLoadKva, totalRacks, utilizedRacks, emptyRacks, avgRackKw };
+  }
+
+  /* -------- One sheet per site -------- */
+  const perSiteRows = [];   // for the summary table
+
+  sites.forEach((site, idx) => {
+    const st = siteStats(site);
+    const rows = [
+      [`Site Profile: ${site.name}`, ''],
+      ['', ''],
+      ['SITE SPECS', ''],
+      ['Site Name', site.name],
+      ['Location', site.location || ''],
+      ['Tier Rating', site.tier || ''],
+      ['Commissioned Date', site.commissionedDate || ''],
+      ['', ''],
+      ['POWER CAPACITY & IT LOAD', ''],
+      ['Total Facility Power Capacity (kVA)', st.totalCapacityKva],
+      ['Current IT Load (kVA)', st.currentItLoadKva],
+      ['IT Load Utilization %', st.totalCapacityKva > 0 ? st.currentItLoadKva / st.totalCapacityKva : 0],
+      ['Available Capacity Load (kVA)', st.totalCapacityKva - st.currentItLoadKva],
+      ['', ''],
+      ['HVAC / COOLING (ITAS)', ''],
+      ['Number of HVAC / ITAS Units', site.hvacUnits != null ? site.hvacUnits : ''],
+      ['Rating per Unit (TR)', site.hvacTrPerUnit != null ? site.hvacTrPerUnit : ''],
+      ['Total HVAC / ITAS Capacity (TR)',
+        (site.hvacUnits != null && site.hvacTrPerUnit != null) ? site.hvacUnits * site.hvacTrPerUnit : ''],
+      ['', ''],
+      ['UPS SYSTEMS', ''],
+      ['Number of UPS Units', site.upsUnits != null ? site.upsUnits : ''],
+      ['Capacity per UPS Unit (kVA)', site.upsKvaPerUnit != null ? site.upsKvaPerUnit : ''],
+      ['Total UPS Capacity (kVA)',
+        (site.upsUnits != null && site.upsKvaPerUnit != null) ? site.upsUnits * site.upsKvaPerUnit : ''],
+      ['', ''],
+      ['STANDBY GENERATORS', ''],
+      ['Number of Generators', site.generatorUnits != null ? site.generatorUnits : ''],
+      ['Capacity per Generator (kVA)', site.generatorKvaPerUnit != null ? site.generatorKvaPerUnit : ''],
+      ['Total Generator Capacity (kVA)',
+        (site.generatorUnits != null && site.generatorKvaPerUnit != null) ? site.generatorUnits * site.generatorKvaPerUnit : ''],
+      ['', ''],
+      ['RACK CAPACITY & UTILIZATION', ''],
+      ['Total Number of Racks', st.totalRacks],
+      ['Avg. Power Capacity per Rack (kW)', Math.round(st.avgRackKw * 100) / 100],
+      ['Total Rack Power Capacity (kW)', st.totalRacks * st.avgRackKw],
+      ['Utilized (Occupied) Racks', st.utilizedRacks],
+      ['Empty (Available) Racks', st.emptyRacks],
+      ['Rack Utilization %', st.totalRacks > 0 ? st.utilizedRacks / st.totalRacks : 0],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 42 }, { wch: 22 }];
+    const tabName = `Site-${String(idx+1).padStart(2, '0')}`;
+    XLSX.utils.book_append_sheet(wb, ws, tabName);
+
+    perSiteRows.push({
+      tab: tabName,
+      name: site.name,
+      location: site.location || '',
+      tier: site.tier || '',
+      totalCapacityKva: st.totalCapacityKva,
+      itLoadKva: st.currentItLoadKva,
+      utilPct: st.totalCapacityKva > 0 ? st.currentItLoadKva / st.totalCapacityKva : 0,
+      availableKva: st.totalCapacityKva - st.currentItLoadKva,
+      totalRacks: st.totalRacks,
+      utilizedRacks: st.utilizedRacks,
+      emptyRacks: st.emptyRacks,
+      rackUtilPct: st.totalRacks > 0 ? st.utilizedRacks / st.totalRacks : 0,
+      totalRackKw: st.totalRacks * st.avgRackKw,
+    });
+  });
+
+  /* -------- Summary sheet (prepend) -------- */
+  const totals = perSiteRows.reduce((acc, r) => {
+    acc.totalCapacityKva += r.totalCapacityKva;
+    acc.itLoadKva += r.itLoadKva;
+    acc.availableKva += r.availableKva;
+    acc.totalRacks += r.totalRacks;
+    acc.utilizedRacks += r.utilizedRacks;
+    acc.emptyRacks += r.emptyRacks;
+    acc.totalRackKw += r.totalRackKw;
+    return acc;
+  }, { totalCapacityKva:0, itLoadKva:0, availableKva:0, totalRacks:0, utilizedRacks:0, emptyRacks:0, totalRackKw:0 });
+
+  const summaryRows = [
+    ['Datacenter Portfolio Summary — ' + (CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label : 'All Sites')],
+    [''],
+    ['PORTFOLIO TOTALS'],
+    ['Total IT Load Capacity (kVA)', totals.totalCapacityKva],
+    ['Total Current IT Load (kVA)', totals.itLoadKva],
+    ['Portfolio IT Load Utilization %', totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0],
+    ['Total Number of Racks', totals.totalRacks],
+    ['Total Utilized Racks', totals.utilizedRacks],
+    ['Total Empty Racks', totals.emptyRacks],
+    ['Portfolio Rack Utilization %', totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0],
+    [''],
+    ['SITE-BY-SITE DETAIL'],
+    ['Site', 'Location', 'Tier', 'Total Capacity (kVA)', 'IT Load (kVA)', 'Utilization %',
+     'Available Capacity (kVA)', 'Total Racks', 'Utilized Racks', 'Empty Racks',
+     'Rack Utilization %', 'Total Rack Capacity (kW)'],
+    ...perSiteRows.map(r => [
+      r.name, r.location, r.tier,
+      r.totalCapacityKva, r.itLoadKva, r.utilPct,
+      r.availableKva, r.totalRacks, r.utilizedRacks, r.emptyRacks,
+      r.rackUtilPct, r.totalRackKw,
+    ]),
+    ['PORTFOLIO TOTAL', '', '',
+      totals.totalCapacityKva, totals.itLoadKva,
+      totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0,
+      totals.availableKva, totals.totalRacks, totals.utilizedRacks, totals.emptyRacks,
+      totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0,
+      totals.totalRackKw],
+  ];
+  const summaryWs = XLSX.utils.aoa_to_sheet(summaryRows);
+  summaryWs['!cols'] = [
+    { wch: 38 }, { wch: 20 }, { wch: 12 },
+    { wch: 20 }, { wch: 18 }, { wch: 14 }, { wch: 22 },
+    { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 20 },
+  ];
+  // Prepend Summary to be the first sheet
+  wb.SheetNames.unshift('Summary');
+  wb.Sheets['Summary'] = summaryWs;
+
+  /* -------- Download -------- */
+  const cat = CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label.replace(/\s+/g,'_') : 'All';
+  const filename = `Datacenter_Portfolio_${cat}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  XLSX.writeFile(wb, filename);
+  showToast(`Exported ${sites.length} site${sites.length === 1 ? '' : 's'} to ${filename}`);
+}
 function renderSiteSpecPanel(site){
   const totalRacks = site.racks.length;
   const populated = site.racks.filter(r => r.devices.length > 0).length;
