@@ -20,6 +20,18 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="config.js"></script>
+<script>
+  window.loadSheetJS = function(){
+    return new Promise((resolve, reject) => {
+      if(window.XLSX) return resolve(window.XLSX);
+      const s = document.createElement('script');
+      s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+      s.onload = () => resolve(window.XLSX);
+      s.onerror = () => reject(new Error('Failed to load SheetJS'));
+      document.head.appendChild(s);
+    });
+  };
+</script>
 <script src="app.js"></script>
 </body>
 </html>
