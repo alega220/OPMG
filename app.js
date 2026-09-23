@@ -1074,8 +1074,14 @@ function renderSite(site){
                 const lastDash = id.lastIndexOf('-');
                 return lastDash >= 0 ? id.slice(lastDash + 1) : id;
               })();
-              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
-  return `
+                            return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
+            }).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
       <div>
