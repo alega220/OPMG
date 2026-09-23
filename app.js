@@ -189,8 +189,7 @@ const state = {
   editDeviceId:null, editDeviceRackId:null, editDeviceSiteId:null, editDeviceError:null,
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
-  userManagerData:null, userManagerError:null, userManagerLoading:false,
-  userManagerData:null, userManagerError:null, userManagerLoading:false,
+    userManagerData:null, userManagerError:null, userManagerLoading:false,
   editingSiteSpecField:null, siteSpecError:null,
 };
 function isEngineer(){ return state.role === 'engineer' || state.role === 'admin'; }
@@ -2654,6 +2653,37 @@ function attachHandlers(){
   if(sb2) sb2.addEventListener('input', ()=>{ state.search = sb2.value; render(); sb2.focus(); sb2.setSelectionRange(sb2.value.length, sb2.value.length); });
   const ss = document.getElementById('sortsel');
   if(ss) ss.addEventListener('change', ()=>{ state.sort = ss.value; render(); });
+
+  // Site spec panel inline editing
+  rootEl.querySelectorAll('[data-spec-edit]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      state.editingSiteSpecField = el.getAttribute('data-spec-edit');
+      state.siteSpecError = null;
+      render();
+    });
+  });
+  rootEl.querySelectorAll('[data-spec-cancel]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      state.editingSiteSpecField = null;
+      state.siteSpecError = null;
+      render();
+    });
+  });
+  rootEl.querySelectorAll('[data-spec-save]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const key = el.getAttribute('data-spec-save');
+      const input = document.getElementById(`spec-input-${key}`);
+      if(!input) return;
+      el.disabled = true;
+      const res = await updateSiteField(state.siteId, key, input.value);
+      el.disabled = false;
+      if(res.error){ state.siteSpecError = res.error; render(); return; }
+      state.editingSiteSpecField = null;
+      state.siteSpecError = null;
+      showToast(`Site updated.`);
+      render();
+    });
+  });
 }
 
 function wireAuthForm(){
