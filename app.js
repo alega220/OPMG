@@ -1082,6 +1082,10 @@ function renderSite(site){
     </div>
   `;
 
+   
+return `
+
+
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
       <div>
