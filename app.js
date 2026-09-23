@@ -190,6 +190,8 @@ const state = {
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
   userManagerData:null, userManagerError:null, userManagerLoading:false,
+  userManagerData:null, userManagerError:null, userManagerLoading:false,
+  editingSiteSpecField:null, siteSpecError:null,
 };
 function isEngineer(){ return state.role === 'engineer' || state.role === 'admin'; }
 function isAdmin(){ return state.role === 'admin'; }
@@ -899,6 +901,126 @@ function racksForFloorPlan(site){
   return [...list].sort((a,b)=>(a.position||0)-(b.position||0));
 }
 
+async function updateSiteField(siteId, field, value){
+  const site = SITES.find(s=>s.id===siteId);
+  if(!site) return { error:'Site not found.' };
+  const patch = {};
+  if(field === 'name'){
+    const v = String(value).trim();
+    if(!v) return { error:'Name is required.' };
+    patch.name = v;
+  } else if(field === 'location'){
+    patch.location = String(value).trim();
+  } else if(field === 'tier'){
+    if(!['Tier I','Tier II','Tier III','Tier IV'].includes(value)) return { error:'Invalid tier.' };
+    patch.tier = value;
+  } else if(field === 'pue'){
+    const n = parseFloat(value);
+    if(isNaN(n) || n < 1) return { error:'PUE must be 1 or greater.' };
+    patch.pue = n;
+  } else if(field === 'category'){
+    if(!CATEGORY_KEYS.includes(value)) return { error:'Invalid category.' };
+    patch.category = value;
+  } else {
+    return { error:'Unknown field.' };
+  }
+  if(LIVE){
+    const { error } = await sb.from('sites').update(patch).eq('id', siteId);
+    if(error) return { error: error.message };
+  }
+  Object.assign(site, patch);
+  recomputeSite(site);
+  return { ok:true };
+}
+
+function renderSiteSpecPanel(site){
+  const totalRacks = site.racks.length;
+  const populated = site.racks.filter(r => r.devices.length > 0).length;
+  const booked = site.racks.filter(r => r.devices.length === 0 && r.customer && r.customer.trim()).length;
+  const empty = totalRacks - populated - booked;
+  const totalDevices = site.racks.reduce((s,r) => s + r.devices.length, 0);
+  const utilPct = site.utilizationPct;
+
+  const editing = state.editingSiteSpecField;
+  const err = state.siteSpecError;
+  const canEdit = isEngineer();
+
+  const field = (label, key, displayValue, editHtml) => {
+    const isEditing = editing === key;
+    return `
+      <div class="spec-row">
+        <div class="spec-label">${esc(label)}</div>
+        <div class="spec-value">
+          ${isEditing
+            ? editHtml
+            : `<span>${displayValue}</span>${canEdit ? ` <button class="editlink" data-spec-edit="${key}">edit</button>` : ''}`}
+        </div>
+      </div>`;
+  };
+
+  const textEdit = (key, value, placeholder) => `
+    <div class="spec-edit">
+      <input id="spec-input-${key}" type="text" value="${esc(value)}" placeholder="${esc(placeholder||'')}"/>
+      <button class="btn btn-primary btn-sm" data-spec-save="${key}">Save</button>
+      <button class="btn btn-sm" data-spec-cancel="1">&times;</button>
+    </div>`;
+
+  const numberEdit = (key, value, min, step) => `
+    <div class="spec-edit">
+      <input id="spec-input-${key}" type="number" value="${value}" min="${min}" step="${step}"/>
+      <button class="btn btn-primary btn-sm" data-spec-save="${key}">Save</button>
+      <button class="btn btn-sm" data-spec-cancel="1">&times;</button>
+    </div>`;
+
+  const selectEdit = (key, value, options) => `
+    <div class="spec-edit">
+      <select id="spec-input-${key}">
+        ${options.map(o => `<option value="${esc(o.value)}" ${o.value===value?'selected':''}>${esc(o.label)}</option>`).join('')}
+      </select>
+      <button class="btn btn-primary btn-sm" data-spec-save="${key}">Save</button>
+      <button class="btn btn-sm" data-spec-cancel="1">&times;</button>
+    </div>`;
+
+  const catKey = CATEGORY_KEYS.includes(site.category) ? site.category : 'colo';
+  const catIcon  = CATEGORIES[catKey].icon;
+  const catLabel = CATEGORIES[catKey].label;
+
+  return `
+    <div class="card spec-panel">
+      <div class="spec-title">Site Specifications</div>
+      ${err ? `<div class="form-error" style="margin:8px 0;">${esc(err)}</div>` : ''}
+
+      <div class="spec-section">Identity</div>
+      ${field('Name', 'name', esc(site.name), textEdit('name', site.name, 'Site name'))}
+      ${field('Location', 'location', site.location ? esc(site.location) : '<span class="faint">—</span>', textEdit('location', site.location||'', 'Location'))}
+      ${field('Tier', 'tier', esc(site.tier||'—'), selectEdit('tier', site.tier||'Tier III', [
+        {value:'Tier I',label:'Tier I'},
+        {value:'Tier II',label:'Tier II'},
+        {value:'Tier III',label:'Tier III'},
+        {value:'Tier IV',label:'Tier IV'},
+      ]))}
+      ${field('Category', 'category', `${catIcon} ${esc(catLabel)}`, selectEdit('category', catKey,
+        CATEGORY_KEYS.map(k => ({ value:k, label: CATEGORIES[k].label }))
+      ))}
+      ${field('PUE', 'pue', (site.pue||0).toFixed(2), numberEdit('pue', site.pue, 1, 0.01))}
+
+      <div class="spec-section">Rack Status</div>
+      <div class="spec-row"><div class="spec-label">Total racks</div><div class="spec-value mono">${totalRacks}</div></div>
+      <div class="spec-row"><div class="spec-label">Populated</div><div class="spec-value mono" style="color:#1FA97A;">${populated}</div></div>
+      <div class="spec-row"><div class="spec-label">Booked</div><div class="spec-value mono" style="color:#6C4EE3;">${booked}</div></div>
+      <div class="spec-row"><div class="spec-label">Empty</div><div class="spec-value mono" style="color:var(--text3);">${empty}</div></div>
+
+      <div class="spec-section">Load</div>
+      <div class="spec-row"><div class="spec-label">Total capacity</div><div class="spec-value mono">${fmtKva(site.totalCapacityKva,0)}</div></div>
+      <div class="spec-row"><div class="spec-label">IT load</div><div class="spec-value mono">${fmtKva(site.itLoadKva,0)}</div></div>
+      <div class="spec-row"><div class="spec-label">Utility load</div><div class="spec-value mono">${fmtKva(site.utilityLoadKva,0)}</div></div>
+      <div class="spec-row">
+        <div class="spec-label">Utilization</div>
+        <div class="spec-value"><span class="badge ${statusColor(utilPct)}">${fmtPct(utilPct)} · ${statusLabel(utilPct)}</span></div>
+      </div>
+      <div class="spec-row"><div class="spec-label">Total devices</div><div class="spec-value mono">${totalDevices}</div></div>
+    </div>`;
+}
 function renderSite(site){
   const racks = filteredSortedRacks(site);
 
@@ -969,36 +1091,35 @@ function renderSite(site){
       </div>
     </div>
 
-    <div class="card kpirow2">
-      <div><div class="stat-label">Racks</div><div class="stat-value">${site.racks.length}</div></div>
-      <div><div class="stat-label">IT load</div><div class="stat-value">${fmtKva(site.itLoadKva,0)}</div></div>
-      <div><div class="stat-label">Utility load</div><div class="stat-value">${fmtKva(site.utilityLoadKva,0)}</div><div class="stat-sub">PUE ${(site.pue||0).toFixed(2)}</div></div>
-      <div><div class="stat-label">Total capacity</div><div class="stat-value">${fmtKva(site.totalCapacityKva,0)}</div></div>
-      <div><div class="stat-label">Utilization</div><div class="stat-value">${fmtPct(site.utilizationPct)}</div></div>
+    <div class="site-layout">
+      <div class="site-main">
+        ${(site.floors && site.floors.length>1) || isEngineer() ? `
+        <div class="subtabs" style="margin-bottom:6px;">
+          ${(site.floors||[]).map(f=>`<button class="subtab ${activeFloorId(site)===f.id?'active':''}" data-floor="${f.id}">${esc(f.name)}</button>`).join('')}
+          ${isEngineer() ? `<button class="subtab" id="addFloorBtn" style="opacity:0.7;">+ Floor</button>` : ''}
+        </div>` : ''}
+
+        <div class="subtabs">
+          <button class="subtab ${state.siteSub==='floor'?'active':''}" data-sub="floor">Floor plan</button>
+          <button class="subtab ${state.siteSub==='list'?'active':''}" data-sub="list">Rack list</button>
+        </div>
+
+        <div class="toolrow">
+          <input class="search-input" id="searchbox" placeholder="Search rack ID, device model, or authorized person…" value="${esc(state.search)}"/>
+          ${state.siteSub==='list' ? `
+          <select class="sort-select" id="sortsel">
+            <option value="name" ${state.sort==='name'?'selected':''}>Sort: rack name</option>
+            <option value="util_desc" ${state.sort==='util_desc'?'selected':''}>Sort: utilization ↓</option>
+            <option value="util_asc" ${state.sort==='util_asc'?'selected':''}>Sort: utilization ↑</option>
+          </select>` : ''}
+        </div>
+
+        ${state.siteSub==='floor' ? floorHtml : listHtml}
+      </div>
+      <aside class="site-side">
+        ${renderSiteSpecPanel(site)}
+      </aside>
     </div>
-
-    ${(site.floors && site.floors.length>1) || isEngineer() ? `
-    <div class="subtabs" style="margin-bottom:6px;">
-      ${(site.floors||[]).map(f=>`<button class="subtab ${activeFloorId(site)===f.id?'active':''}" data-floor="${f.id}">${esc(f.name)}</button>`).join('')}
-      ${isEngineer() ? `<button class="subtab" id="addFloorBtn" style="opacity:0.7;">+ Floor</button>` : ''}
-    </div>` : ''}
-
-    <div class="subtabs">
-      <button class="subtab ${state.siteSub==='floor'?'active':''}" data-sub="floor">Floor plan</button>
-      <button class="subtab ${state.siteSub==='list'?'active':''}" data-sub="list">Rack list</button>
-    </div>
-
-    <div class="toolrow">
-      <input class="search-input" id="searchbox" placeholder="Search rack ID, device model, or authorized person…" value="${esc(state.search)}"/>
-      ${state.siteSub==='list' ? `
-      <select class="sort-select" id="sortsel">
-        <option value="name" ${state.sort==='name'?'selected':''}>Sort: rack name</option>
-        <option value="util_desc" ${state.sort==='util_desc'?'selected':''}>Sort: utilization ↓</option>
-        <option value="util_asc" ${state.sort==='util_asc'?'selected':''}>Sort: utilization ↑</option>
-      </select>` : ''}
-    </div>
-
-    ${state.siteSub==='floor' ? floorHtml : listHtml}
   `;
 }
 
