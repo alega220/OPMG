@@ -1067,14 +1067,14 @@ function renderSite(site){
           <div class="racktiles" data-row="${esc(rk)}">
             ${byRow[rk].map((r,i)=>{
               const v = rackTileVisual(r);
-              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${i+1}</div>`;
-            }).join('')}
-          </div>
-        </div>
-      `).join('')}
-    </div>
-  `;
-
+                            const tileLabel = (() => {
+                const id = String(r.id || '');
+                const m = id.match(/([A-Za-z]\d+)(?:-F\d+)?$/);
+                if(m) return m[1];
+                const lastDash = id.lastIndexOf('-');
+                return lastDash >= 0 ? id.slice(lastDash + 1) : id;
+              })();
+              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
   return `
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
