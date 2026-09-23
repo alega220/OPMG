@@ -1351,6 +1351,7 @@ function renderSite(site){
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${isEngineer() ? `<button class="btn" data-add-rack="${site.id}">+ Add rack</button>` : ''}
+         <button class="btn" id="exportExcelBtn" title="Download this category's sites as an Excel workbook">📥 Export Excel</button>
         ${isEngineer() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
         ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
@@ -2922,6 +2923,9 @@ function attachHandlers(){
   const ss = document.getElementById('sortsel');
   if(ss) ss.addEventListener('change', ()=>{ state.sort = ss.value; render(); });
 
+     // Excel export button
+  const exportBtn = document.getElementById('exportExcelBtn');
+  if(exportBtn) exportBtn.addEventListener('click', exportPortfolioToExcel);
   // Site spec panel inline editing
   rootEl.querySelectorAll('[data-spec-edit]').forEach(el=>{
     el.addEventListener('click', ()=>{
