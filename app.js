@@ -4,7 +4,9 @@
    or LIVE MODE (Supabase auth + persistence) when SUPABASE_URL /
    SUPABASE_ANON_KEY are filled in.
 
-   v2: site categories (colo / inhouse) with entry picker.
+   v3: site categories (colo / inhouse) with entry picker
+       + site spec panel with inline editing
+       + rack-id tile labels on floor plan
 ================================================================== */
 
 const LIVE = Boolean(window.SUPABASE_URL && window.SUPABASE_ANON_KEY);
@@ -189,7 +191,7 @@ const state = {
   editDeviceId:null, editDeviceRackId:null, editDeviceSiteId:null, editDeviceError:null,
   historyRack:null, historySiteId:null, historyEvents:null, historyLoading:false,
   authMode:'signin', authError:null,
-    userManagerData:null, userManagerError:null, userManagerLoading:false,
+  userManagerData:null, userManagerError:null, userManagerLoading:false,
   editingSiteSpecField:null, siteSpecError:null,
 };
 function isEngineer(){ return state.role === 'engineer' || state.role === 'admin'; }
@@ -1020,6 +1022,7 @@ function renderSiteSpecPanel(site){
       <div class="spec-row"><div class="spec-label">Total devices</div><div class="spec-value mono">${totalDevices}</div></div>
     </div>`;
 }
+
 function renderSite(site){
   const racks = filteredSortedRacks(site);
 
@@ -1067,14 +1070,14 @@ function renderSite(site){
           <div class="racktiles" data-row="${esc(rk)}">
             ${byRow[rk].map((r,i)=>{
               const v = rackTileVisual(r);
-                            const tileLabel = (() => {
+              const tileLabel = (() => {
                 const id = String(r.id || '');
                 const m = id.match(/([A-Za-z]\d+)(?:-F\d+)?$/);
                 if(m) return m[1];
                 const lastDash = id.lastIndexOf('-');
                 return lastDash >= 0 ? id.slice(lastDash + 1) : id;
               })();
-                            return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
+              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
             }).join('')}
           </div>
         </div>
@@ -1082,10 +1085,7 @@ function renderSite(site){
     </div>
   `;
 
-   
-return `
-
-
+  return `
     <button class="backlink" data-back="1">&larr; All sites</button>
     <div class="sitehead">
       <div>
@@ -1634,7 +1634,7 @@ function wireUserManagerModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD SITE MODAL (admin only) — now with category selector
+   ADD SITE MODAL (admin only) — with category selector
 --------------------------------------------------------------- */
 function renderAddSiteModal(){
   const defaultCat = state.siteCategory || 'colo';
@@ -1759,7 +1759,7 @@ function renderAddFloorModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT SITE MODAL — now with category selector
+   EDIT SITE MODAL — with category selector
 --------------------------------------------------------------- */
 function renderEditSiteModal(){
   const site = SITES.find(s=>s.id===state.editSiteId);
