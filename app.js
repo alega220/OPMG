@@ -3,6 +3,8 @@
    Runs in DEMO MODE (mock data, no login) when config.js is blank,
    or LIVE MODE (Supabase auth + persistence) when SUPABASE_URL /
    SUPABASE_ANON_KEY are filled in.
+
+   v2: site categories (colo / inhouse) with entry picker.
 ================================================================== */
 
 const LIVE = Boolean(window.SUPABASE_URL && window.SUPABASE_ANON_KEY);
@@ -40,11 +42,18 @@ const PEOPLE = [
   "O. Tarek — Vendor Contractor","N. Adel — Facilities",
 ];
 const SITE_DEFS = [
-  {id:"b90",name:"B90",location:"Cairo — Bldg 90",tier:"Tier III",rackCount:195,caps:[5,8,10,15]},
-  {id:"a12",name:"A12",location:"Cairo — Bldg 12",tier:"Tier III",rackCount:96,caps:[5,8,10]},
-  {id:"c77",name:"C77",location:"Alexandria — Bldg 77",tier:"Tier II",rackCount:60,caps:[4,6,8]},
-  {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20]},
+  {id:"b90",name:"B90",location:"Cairo — Bldg 90",tier:"Tier III",rackCount:195,caps:[5,8,10,15],category:"colo"},
+  {id:"a12",name:"A12",location:"Cairo — Bldg 12",tier:"Tier III",rackCount:96,caps:[5,8,10],category:"colo"},
+  {id:"c77",name:"C77",location:"Alexandria — Bldg 77",tier:"Tier II",rackCount:60,caps:[4,6,8],category:"colo"},
+  {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20],category:"inhouse"},
 ];
+
+/* ---------- Category constants ---------- */
+const CATEGORIES = {
+  colo:    { label: 'Colocation',  icon: '🏢', desc: 'Customer-hosted racks and shared facilities' },
+  inhouse: { label: 'In-House',    icon: '🏠', desc: 'Company-owned and operated facilities' },
+};
+const CATEGORY_KEYS = Object.keys(CATEGORIES);
 
 function genSerial(rng){
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -94,12 +103,7 @@ function generateSite(def){
    AGGREGATE HELPERS (shared by demo + live)
 --------------------------------------------------------------- */
 function recomputeRack(rack){
-  // rack.actualKva is a directly-entered measured value (e.g. from a PDU reading),
-  // not derived from devices — only totalDatasheetKva (sum of device ratings) and
-  // occupiedU are computed here.
   rack.totalDatasheetKva = rack.devices.reduce((s,d)=>s+d.datasheetKva,0);
-  // displayed "datasheet power" is the nameplate total derated by an assumed
-  // 0.6 utilization/power factor, not the raw nameplate sum
   rack.totalDatasheetKw = rack.totalDatasheetKva * 0.6;
   rack.occupiedU = rack.devices.reduce((s,d)=>s+d.sizeU,0);
 }
@@ -169,6 +173,7 @@ function showToast(msg, isError){
 let SITES = [];
 const state = {
   ready:false, user:null, role: LIVE ? null : 'engineer', approved: LIVE ? false : true,
+  siteCategory: null,
   view:'dashboard', siteId:null, siteSub:'floor', selectedFloorId:null, search:'', sort:'name',
   modalType:null, modalRack:null, modalSiteId:null, rackFace:'front',
   addDeviceSiteId:null, addDeviceError:null,
@@ -186,10 +191,12 @@ const state = {
   authMode:'signin', authError:null,
   userManagerData:null, userManagerError:null, userManagerLoading:false,
 };
-// engineers AND admins can add/remove devices, racks, and edit rack capacity/position/name
-// within their assigned sites; only admins can create/remove sites or manage users
 function isEngineer(){ return state.role === 'engineer' || state.role === 'admin'; }
 function isAdmin(){ return state.role === 'admin'; }
+function visibleSites(){
+  if(!state.siteCategory) return [];
+  return SITES.filter(s => (s.category || 'colo') === state.siteCategory);
+}
 
 /* ---------------------------------------------------------------
    DATA LAYER — demo vs live
@@ -233,7 +240,7 @@ async function loadData(){
       recomputeRack(rack);
       return rack;
     });
-    const site = { id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue), floors, racks };
+    const site = { id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue), category: s.category || 'colo', floors, racks };
     recomputeSite(site);
     return site;
   });
@@ -245,7 +252,7 @@ async function seedDemoDataToSupabase(){
   showToast('Seeding demo data — this can take a minute…');
   const demo = SITE_DEFS.map(generateSite);
   for(const site of demo){
-    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue });
+    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue, category:site.category || 'colo' });
     const rackRows = site.racks.map(r=>({ id:r.id, site_id:site.id, row_label:r.row, capacity_kva:r.capacityKva, actual_kva:r.actualKva, position:r.position }));
     for(let i=0;i<rackRows.length;i+=500) await sb.from('racks').upsert(rackRows.slice(i,i+500));
     let deviceRows = [];
@@ -288,8 +295,6 @@ async function editDevice(siteId, rackId, deviceId, { model, sizeU, startU: requ
   const dev = rack.devices.find(d=>d.id===deviceId);
   if(!dev) return { error:'Device not found.' };
 
-  // check whether the requested position (with the requested size) is free,
-  // ignoring the device's own current slot
   function slotIsFree(start, size){
     if(start < 1 || start + size - 1 > 42) return false;
     return !rack.devices.some(d=>{
@@ -473,13 +478,14 @@ function slugify(name){
   return id;
 }
 
-async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva }){
+async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category }){
   const id = slugify(name);
   const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
+  const cat = (category && CATEGORY_KEYS.includes(category)) ? category : 'colo';
 
   let floorId;
   if(LIVE){
-    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue });
+    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue, category: cat });
     if(e1) return { error: e1.message };
     const { data: floorData, error: eF } = await sb.from('floors').insert({ site_id:id, name:'Floor 1', position:1 }).select().single();
     if(eF) return { error: eF.message };
@@ -505,7 +511,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
 
   const racks = rackDefs.map(r=>({ ...r, devices:[], history:[] }));
   racks.forEach(recomputeRack);
-  const site = { id, name, location, tier, pue, floors:[{ id:floorId, name:'Floor 1', position:1 }], racks };
+  const site = { id, name, location, tier, pue, category: cat, floors:[{ id:floorId, name:'Floor 1', position:1 }], racks };
   recomputeSite(site);
   SITES.push(site);
   return { ok:true, site };
@@ -548,8 +554,6 @@ async function addFloorToSite(siteId, { name, rackCount, rowCount, defaultCapaci
   }
   const floor = { id:floorId, name, position };
 
-  // continue row lettering from whatever's already used anywhere on this site,
-  // so rack names stay globally unique across floors (e.g. floor 1 = A-F, floor 2 = G-J)
   const usedLetters = new Set(site.racks.map(r=>(r.row||'').toUpperCase().charAt(0)).filter(Boolean));
   let startCode = 65;
   while(usedLetters.has(String.fromCharCode(startCode))) startCode++;
@@ -603,13 +607,14 @@ async function removeSite(siteId){
   return { ok:true };
 }
 
-async function updateSiteInfo(siteId, { name, location, tier, pue }){
+async function updateSiteInfo(siteId, { name, location, tier, pue, category }){
   const site = SITES.find(s=>s.id===siteId);
+  const cat = (category && CATEGORY_KEYS.includes(category)) ? category : (site.category || 'colo');
   if(LIVE){
-    const { error } = await sb.from('sites').update({ name, location, tier, pue }).eq('id', siteId);
+    const { error } = await sb.from('sites').update({ name, location, tier, pue, category: cat }).eq('id', siteId);
     if(error) return { error: error.message };
   }
-  site.name = name; site.location = location; site.tier = tier; site.pue = pue;
+  site.name = name; site.location = location; site.tier = tier; site.pue = pue; site.category = cat;
   recomputeSite(site);
   return { ok:true };
 }
@@ -619,7 +624,7 @@ function pushDemoHistory(rack, eventType, detail){
   rack.history.unshift({ eventType, detail, actor: state.user ? state.user.email : `Demo ${state.role}`, createdAt: new Date().toISOString() });
 }
 
-const HISTORY_WINDOW_DAYS = 182; // ~6 months
+const HISTORY_WINDOW_DAYS = 182;
 
 async function loadRackHistory(rackId){
   const sinceIso = new Date(Date.now() - HISTORY_WINDOW_DAYS*24*60*60*1000).toISOString();
@@ -675,7 +680,7 @@ async function initAuth(){
   const { data: { session } } = await sb.auth.getSession();
   if(session) await onSignedIn(session.user);
   sb.auth.onAuthStateChange((event, session)=>{
-    if(event==='SIGNED_OUT'){ state.user=null; state.role=null; state.approved=false; renderRoot(); }
+    if(event==='SIGNED_OUT'){ state.user=null; state.role=null; state.approved=false; state.siteCategory=null; renderRoot(); }
   });
 }
 async function onSignedIn(user){
@@ -712,7 +717,7 @@ async function signUp(email, password){
 }
 async function signOut(){
   await sb.auth.signOut();
-  state.user=null; state.role=null; state.approved=false; SITES=[]; state.view='dashboard'; state.siteId=null;
+  state.user=null; state.role=null; state.approved=false; state.siteCategory=null; SITES=[]; state.view='dashboard'; state.siteId=null;
   renderRoot();
 }
 
@@ -746,37 +751,67 @@ function renderLogin(){
 }
 
 /* ---------------------------------------------------------------
+   CATEGORY PICKER
+--------------------------------------------------------------- */
+function renderCategoryPicker(){
+  const counts = {};
+  CATEGORY_KEYS.forEach(k => counts[k] = SITES.filter(s => (s.category || 'colo') === k).length);
+  return `
+  <div class="catpicker-wrap">
+    <div class="h1">Choose a category</div>
+    <div class="muted" style="font-size:13px;margin:6px 0 24px;">
+      Pick which set of sites you want to work with. You can switch anytime from the top bar.
+    </div>
+    <div class="catpicker-grid">
+      ${CATEGORY_KEYS.map(k => {
+        const c = CATEGORIES[k];
+        const n = counts[k];
+        return `
+        <button class="catpicker-card" data-pick-category="${k}">
+          <div class="catpicker-icon">${c.icon}</div>
+          <div class="catpicker-title">${esc(c.label)} Sites</div>
+          <div class="catpicker-count">${n} site${n === 1 ? '' : 's'}</div>
+          <div class="catpicker-desc">${esc(c.desc)}</div>
+        </button>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
    DASHBOARD
 --------------------------------------------------------------- */
 function renderDashboard(){
-  const racks = SITES.reduce((s,x)=>s+x.racks.length,0);
-  const it = SITES.reduce((s,x)=>s+x.itLoadKva,0);
-  const util = SITES.reduce((s,x)=>s+x.utilityLoadKva,0);
-  const cap = SITES.reduce((s,x)=>s+x.totalCapacityKva,0);
+  const sites = visibleSites();
+  const racks = sites.reduce((s,x)=>s+x.racks.length,0);
+  const it = sites.reduce((s,x)=>s+x.itLoadKva,0);
+  const util = sites.reduce((s,x)=>s+x.utilityLoadKva,0);
+  const cap = sites.reduce((s,x)=>s+x.totalCapacityKva,0);
   const pct = cap>0 ? it/cap : 0;
 
   const flat=[];
-  SITES.forEach(s=>s.racks.forEach(r=>{ const p=r.capacityKva>0 ? r.actualKva/r.capacityKva : 0; if(p>=0.75) flat.push({site:s.name,siteId:s.id,rack:r.id,pct:p}); }));
+  sites.forEach(s=>s.racks.forEach(r=>{ const p=r.capacityKva>0 ? r.actualKva/r.capacityKva : 0; if(p>=0.75) flat.push({site:s.name,siteId:s.id,rack:r.id,pct:p}); }));
   flat.sort((a,b)=>b.pct-a.pct);
   const top = flat.slice(0,6);
   const critCount = flat.filter(f=>f.pct>=0.9).length;
   const warnCount = flat.filter(f=>f.pct>=0.75 && f.pct<0.9).length;
 
-  if(SITES.length===0 && LIVE){
+  const catLabel = state.siteCategory ? CATEGORIES[state.siteCategory].label : '';
+
+  if(sites.length===0 && LIVE){
     return `
-      <div class="h1">Colocation facility operations</div>
-      <div class="muted" style="font-size:13px;margin:8px 0 20px;">No sites yet in this Supabase project.</div>
-      ${isAdmin() ? `<button class="btn btn-primary" id="seedBtn">Seed demo data (4 sites)</button>` :
-        `<div class="faint" style="font-size:13px;">Ask an admin to seed initial site data.</div>`}
+      <div class="h1">${esc(catLabel)} sites</div>
+      <div class="muted" style="font-size:13px;margin:8px 0 20px;">No sites in this category yet.</div>
+      ${isAdmin() ? `<button class="btn btn-primary" id="openAddSite">+ Add ${esc(catLabel.toLowerCase())} site</button>` : ''}
     `;
   }
 
   return `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-      <div class="h1">Colocation facility operations</div>
+      <div class="h1">${esc(catLabel)} sites</div>
       ${isAdmin() ? `<button class="btn btn-primary" id="openAddSite">+ Add site</button>` : ''}
     </div>
-    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racks} racks · portfolio utilization ${fmtPct(pct)}</div>
+    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${sites.length} sites · ${racks} racks · portfolio utilization ${fmtPct(pct)}</div>
 
     <div class="card kpirow">
       <div><div class="stat-label">Total racks</div><div class="stat-value">${racks}</div></div>
@@ -800,7 +835,7 @@ function renderDashboard(){
     </div>` : ''}
 
     <div class="sitegrid">
-      ${SITES.map(s=>`
+      ${sites.map(s=>`
         <div class="card sitecard" data-open-site="${s.id}">
           <div class="sitecard-top">
             <div><div class="sitename">${s.name}</div><div class="siteloc">${esc(s.location)}</div></div>
@@ -853,8 +888,6 @@ function filteredSortedRacks(site){
   return sorted;
 }
 
-// Floor plan has its own ordering (by saved position within each row, drag-and-drop
-// controlled) — independent of the list view's name/utilization sort dropdown.
 function racksForFloorPlan(site){
   const floorId = activeFloorId(site);
   let list = floorId ? site.racks.filter(r=>r.floorId===floorId) : site.racks;
@@ -1471,16 +1504,17 @@ function wireUserManagerModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD SITE MODAL (admin only)
+   ADD SITE MODAL (admin only) — now with category selector
 --------------------------------------------------------------- */
 function renderAddSiteModal(){
+  const defaultCat = state.siteCategory || 'colo';
   return `
   <div class="overlay" id="overlay">
     <div class="modal" style="max-width:520px;">
       <div class="modal-top">
         <div>
           <div class="sitename" style="font-size:18px;">Add site</div>
-          <div class="siteloc" style="margin-top:2px;">Define the rack layout for a new colocation site</div>
+          <div class="siteloc" style="margin-top:2px;">Define the rack layout for a new site</div>
         </div>
         <button class="modal-close" id="closeModal">&times;</button>
       </div>
@@ -1503,6 +1537,13 @@ function renderAddSiteModal(){
               <option>Tier I</option><option>Tier II</option><option selected>Tier III</option><option>Tier IV</option>
             </select>
           </div>
+        </div>
+
+        <div class="field">
+          <label>Category</label>
+          <select id="sCategory">
+            ${CATEGORY_KEYS.map(k => `<option value="${k}" ${k===defaultCat?'selected':''}>${esc(CATEGORIES[k].label)}</option>`).join('')}
+          </select>
         </div>
 
         <div class="field-row">
@@ -1538,7 +1579,7 @@ function renderAddSiteModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT SITE MODAL (assigned engineers + admins) — name/location/tier/PUE
+   ADD FLOOR MODAL
 --------------------------------------------------------------- */
 function renderAddFloorModal(){
   const site = SITES.find(s=>s.id===state.addFloorSiteId);
@@ -1588,10 +1629,11 @@ function renderAddFloorModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT SITE MODAL (assigned engineers + admins) — name/location/tier/PUE
+   EDIT SITE MODAL — now with category selector
 --------------------------------------------------------------- */
 function renderEditSiteModal(){
   const site = SITES.find(s=>s.id===state.editSiteId);
+  const currentCat = site.category || 'colo';
   return `
   <div class="overlay" id="overlay">
     <div class="modal" style="max-width:480px;">
@@ -1622,9 +1664,17 @@ function renderEditSiteModal(){
             </select>
           </div>
         </div>
-        <div class="field">
-          <label>PUE</label>
-          <input id="ePue" type="number" min="1" step="0.01" value="${site.pue}"/>
+        <div class="field-row">
+          <div class="field">
+            <label>Category</label>
+            <select id="eCategory">
+              ${CATEGORY_KEYS.map(k => `<option value="${k}" ${k===currentCat?'selected':''}>${esc(CATEGORIES[k].label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>PUE</label>
+            <input id="ePue" type="number" min="1" step="0.01" value="${site.pue}"/>
+          </div>
         </div>
 
         <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;">
@@ -1637,7 +1687,7 @@ function renderEditSiteModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD RACK MODAL (assigned engineers + admins) — add a single rack to any row
+   ADD RACK MODAL
 --------------------------------------------------------------- */
 function renderAddRackModal(){
   const site = SITES.find(s=>s.id===state.addRackSiteId);
@@ -1744,7 +1794,7 @@ const COVE = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3a
 
 function deviceMixCounts(){
   const map = {};
-  SITES.forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.model]=(map[d.model]||0)+1; })));
+  visibleSites().forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.model]=(map[d.model]||0)+1; })));
   const entries = Object.entries(map).sort((a,b)=>b[1]-a[1]);
   const top = entries.slice(0,7);
   const restSum = entries.slice(7).reduce((s,[,c])=>s+c,0);
@@ -1753,28 +1803,30 @@ function deviceMixCounts(){
 }
 function ownerPowerTotals(){
   const map = {};
-  SITES.forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.authorizedPerson]=(map[d.authorizedPerson]||0)+d.datasheetKva; })));
+  visibleSites().forEach(s=>s.racks.forEach(r=>r.devices.forEach(d=>{ map[d.authorizedPerson]=(map[d.authorizedPerson]||0)+d.datasheetKva; })));
   return Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,6);
 }
 function utilBuckets(){
   const buckets = [0,0,0,0];
-  SITES.forEach(s=>s.racks.forEach(r=>{
+  visibleSites().forEach(s=>s.racks.forEach(r=>{
     const p = r.capacityKva>0 ? (r.actualKva/r.capacityKva)*100 : 0;
     if(p<50) buckets[0]++; else if(p<75) buckets[1]++; else if(p<90) buckets[2]++; else buckets[3]++;
   }));
   return buckets;
 }
 function renderAnalysis(){
-  const racks = SITES.reduce((s,x)=>s+x.racks.length,0);
-  const it = SITES.reduce((s,x)=>s+x.itLoadKva,0);
-  const util = SITES.reduce((s,x)=>s+x.utilityLoadKva,0);
-  const cap = SITES.reduce((s,x)=>s+x.totalCapacityKva,0);
-  const devices = SITES.reduce((s,x)=>s+x.racks.reduce((s2,r)=>s2+r.devices.length,0),0);
+  const sites = visibleSites();
+  const racks = sites.reduce((s,x)=>s+x.racks.length,0);
+  const it = sites.reduce((s,x)=>s+x.itLoadKva,0);
+  const util = sites.reduce((s,x)=>s+x.utilityLoadKva,0);
+  const cap = sites.reduce((s,x)=>s+x.totalCapacityKva,0);
+  const devices = sites.reduce((s,x)=>s+x.racks.reduce((s2,r)=>s2+r.devices.length,0),0);
   const owners = ownerPowerTotals();
+  const catLabel = state.siteCategory ? CATEGORIES[state.siteCategory].label : '';
 
   return `
-    <div class="h1">Portfolio analysis</div>
-    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${SITES.length} sites · ${racks} racks · ${devices} devices tracked</div>
+    <div class="h1">${esc(catLabel)} portfolio analysis</div>
+    <div class="muted" style="font-size:13px;margin:4px 0 20px;">${sites.length} sites · ${racks} racks · ${devices} devices tracked</div>
 
     <div class="card kpirow">
       <div><div class="stat-label">Total IT load</div><div class="stat-value">${fmtKva(it,0)}</div></div>
@@ -1786,7 +1838,7 @@ function renderAnalysis(){
     <div class="agrid">
       <div class="card achart-card">
         <div class="achart-title">IT load by site</div>
-        <div style="position:relative;height:220px;"><canvas id="chartSiteLoad" role="img" aria-label="Bar chart of IT load in kilowatts for each site"></canvas></div>
+        <div style="position:relative;height:220px;"><canvas id="chartSiteLoad" role="img" aria-label="Bar chart of IT load in kVA for each site"></canvas></div>
       </div>
       <div class="card achart-card">
         <div class="achart-title">Rack utilization distribution</div>
@@ -1819,12 +1871,13 @@ function drawAnalysisCharts(){
   if(typeof Chart === 'undefined') return;
   Object.values(chartInstances).forEach(c=>c && c.destroy());
   chartInstances = {};
+  const sites = visibleSites();
 
   const siteLoadEl = document.getElementById('chartSiteLoad');
   if(siteLoadEl){
     chartInstances.siteLoad = new Chart(siteLoadEl, {
       type:'bar',
-      data:{ labels: SITES.map(s=>s.name), datasets:[{ label:'IT load (kVA)', data: SITES.map(s=>Math.round(s.itLoadKva)), backgroundColor:'#6C4EE3', borderRadius:4, maxBarThickness:44 }] },
+      data:{ labels: sites.map(s=>s.name), datasets:[{ label:'IT load (kVA)', data: sites.map(s=>Math.round(s.itLoadKva)), backgroundColor:'#6C4EE3', borderRadius:4, maxBarThickness:44 }] },
       options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } },
         scales:{ y:{ beginAtZero:true, grid:{ color:'#EEF0F3' }, ticks:{ color:'#8A93A3' } }, x:{ grid:{ display:false }, ticks:{ color:'#5B6472' } } } }
     });
@@ -1875,6 +1928,23 @@ function renderRoot(){
     document.getElementById('pendingRecheck').addEventListener('click', recheckApproval);
     return;
   }
+
+  if(!state.siteCategory){
+    document.getElementById('topbar').style.display = 'flex';
+    renderTopbarMeta();
+    rootEl.innerHTML = renderCategoryPicker();
+    rootEl.querySelectorAll('[data-pick-category]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        state.siteCategory = el.getAttribute('data-pick-category');
+        state.view = 'dashboard';
+        state.siteId = null;
+        state.search = '';
+        renderRoot();
+      });
+    });
+    return;
+  }
+
   document.getElementById('topbar').style.display = 'flex';
   renderTopbarMeta();
   render();
@@ -1913,8 +1983,11 @@ async function openUserManager(){
 
 function renderTopbarMeta(){
   if(LIVE){
-    const roleCssClass = state.role==='engineer' ? 'manager' : state.role; // reuse existing purple styling
+    const roleCssClass = state.role==='engineer' ? 'manager' : state.role;
+    const catLabel = state.siteCategory ? CATEGORIES[state.siteCategory].label : '';
+    const catIcon = state.siteCategory ? CATEGORIES[state.siteCategory].icon : '';
     topbarMeta.innerHTML = `
+      ${catLabel ? `<span class="cat-chip" id="switchCatBtn" title="Click to switch category">${catIcon} ${esc(catLabel)}</span>` : ''}
       <span class="role-tag ${roleCssClass}">${state.role}</span>
       <span>${esc(state.user.email)}</span>
       ${isAdmin() ? `<button class="editlink" id="openUserManager" style="margin-left:8px;">Manage users</button>` : ''}
@@ -1923,6 +1996,13 @@ function renderTopbarMeta(){
     document.getElementById('signOutBtn').addEventListener('click', signOut);
     const umBtn = document.getElementById('openUserManager');
     if(umBtn) umBtn.addEventListener('click', openUserManager);
+    const scBtn = document.getElementById('switchCatBtn');
+    if(scBtn) scBtn.addEventListener('click', ()=>{
+      state.siteCategory = null;
+      state.view = 'dashboard';
+      state.siteId = null;
+      renderRoot();
+    });
   } else {
     topbarMeta.innerHTML = `
       <span class="demo-switch">Demo mode — viewing as
@@ -2258,6 +2338,7 @@ async function handleAddSiteSubmit(e){
   const name = document.getElementById('sName').value.trim();
   const location = document.getElementById('sLocation').value.trim();
   const tier = document.getElementById('sTier').value;
+  const category = document.getElementById('sCategory').value;
   const rackCount = parseInt(document.getElementById('sRackCount').value, 10);
   const rowCount = parseInt(document.getElementById('sRowCount').value, 10);
   const defaultCapacityKva = parseFloat(document.getElementById('sCapacity').value);
@@ -2269,7 +2350,7 @@ async function handleAddSiteSubmit(e){
   if(isNaN(defaultCapacityKva) || defaultCapacityKva<=0){ state.addSiteError='Enter a valid default rack capacity greater than 0.'; renderModal(); return; }
   if(isNaN(pue) || pue<1){ state.addSiteError='PUE must be 1 or greater.'; renderModal(); return; }
 
-  const res = await createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva });
+  const res = await createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category });
   if(res.error){ state.addSiteError = res.error; renderModal(); return; }
 
   closeModal();
@@ -2282,12 +2363,13 @@ async function handleEditSiteSubmit(e){
   const name = document.getElementById('eName').value.trim();
   const location = document.getElementById('eLocation').value.trim();
   const tier = document.getElementById('eTier').value;
+  const category = document.getElementById('eCategory').value;
   const pue = parseFloat(document.getElementById('ePue').value);
 
   if(!name){ state.editSiteError='Enter a site name.'; renderModal(); return; }
   if(isNaN(pue) || pue<1){ state.editSiteError='PUE must be 1 or greater.'; renderModal(); return; }
 
-  const res = await updateSiteInfo(state.editSiteId, { name, location, tier, pue });
+  const res = await updateSiteInfo(state.editSiteId, { name, location, tier, pue, category });
   if(res.error){ state.editSiteError = res.error; renderModal(); return; }
 
   closeModal();
