@@ -243,7 +243,18 @@ async function loadData(){
       recomputeRack(rack);
       return rack;
     });
-    const site = { id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue), category: s.category || 'colo', floors, racks };
+    const site = {
+      id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue),
+      category: s.category || 'colo',
+      commissionedDate: s.commissioned_date || '',
+      hvacUnits: s.hvac_units != null ? Number(s.hvac_units) : null,
+      hvacTrPerUnit: s.hvac_tr_per_unit != null ? Number(s.hvac_tr_per_unit) : null,
+      upsUnits: s.ups_units != null ? Number(s.ups_units) : null,
+      upsKvaPerUnit: s.ups_kva_per_unit != null ? Number(s.ups_kva_per_unit) : null,
+      generatorUnits: s.generator_units != null ? Number(s.generator_units) : null,
+      generatorKvaPerUnit: s.generator_kva_per_unit != null ? Number(s.generator_kva_per_unit) : null,
+      floors, racks
+    };
     recomputeSite(site);
     return site;
   });
@@ -919,9 +930,41 @@ async function updateSiteField(siteId, field, value){
     const n = parseFloat(value);
     if(isNaN(n) || n < 1) return { error:'PUE must be 1 or greater.' };
     patch.pue = n;
-  } else if(field === 'category'){
+    } else if(field === 'category'){
     if(!CATEGORY_KEYS.includes(value)) return { error:'Invalid category.' };
     patch.category = value;
+  } else if(field === 'commissioned_date'){
+    patch.commissioned_date = value || null;
+  } else if(field === 'hvac_units'){
+    const n = parseInt(value, 10);
+    if(value === '' || value == null) patch.hvac_units = null;
+    else if(isNaN(n) || n < 0) return { error:'HVAC units must be a non-negative number.' };
+    else patch.hvac_units = n;
+  } else if(field === 'hvac_tr_per_unit'){
+    const n = parseFloat(value);
+    if(value === '' || value == null) patch.hvac_tr_per_unit = null;
+    else if(isNaN(n) || n < 0) return { error:'TR per unit must be a non-negative number.' };
+    else patch.hvac_tr_per_unit = n;
+  } else if(field === 'ups_units'){
+    const n = parseInt(value, 10);
+    if(value === '' || value == null) patch.ups_units = null;
+    else if(isNaN(n) || n < 0) return { error:'UPS units must be a non-negative number.' };
+    else patch.ups_units = n;
+  } else if(field === 'ups_kva_per_unit'){
+    const n = parseFloat(value);
+    if(value === '' || value == null) patch.ups_kva_per_unit = null;
+    else if(isNaN(n) || n < 0) return { error:'UPS kVA per unit must be a non-negative number.' };
+    else patch.ups_kva_per_unit = n;
+  } else if(field === 'generator_units'){
+    const n = parseInt(value, 10);
+    if(value === '' || value == null) patch.generator_units = null;
+    else if(isNaN(n) || n < 0) return { error:'Generator units must be a non-negative number.' };
+    else patch.generator_units = n;
+  } else if(field === 'generator_kva_per_unit'){
+    const n = parseFloat(value);
+    if(value === '' || value == null) patch.generator_kva_per_unit = null;
+    else if(isNaN(n) || n < 0) return { error:'Generator kVA per unit must be a non-negative number.' };
+    else patch.generator_kva_per_unit = n;
   } else {
     return { error:'Unknown field.' };
   }
@@ -929,7 +972,20 @@ async function updateSiteField(siteId, field, value){
     const { error } = await sb.from('sites').update(patch).eq('id', siteId);
     if(error) return { error: error.message };
   }
-  Object.assign(site, patch);
+  const FIELD_MAP = {
+    commissioned_date: 'commissionedDate',
+    hvac_units: 'hvacUnits',
+    hvac_tr_per_unit: 'hvacTrPerUnit',
+    ups_units: 'upsUnits',
+    ups_kva_per_unit: 'upsKvaPerUnit',
+    generator_units: 'generatorUnits',
+    generator_kva_per_unit: 'generatorKvaPerUnit',
+  };
+  const sitePatch = {};
+  for(const [k, v] of Object.entries(patch)){
+    sitePatch[FIELD_MAP[k] || k] = v;
+  }
+  Object.assign(site, sitePatch);
   recomputeSite(site);
   return { ok:true };
 }
@@ -946,15 +1002,16 @@ function renderSiteSpecPanel(site){
   const err = state.siteSpecError;
   const canEdit = isEngineer();
 
-  const field = (label, key, displayValue, editHtml) => {
-    const isEditing = editing === key;
+    const field = (label, key, displayValue, editHtml) => {
+    const isEditing = editing === key && key !== null;
+    const showEdit = canEdit && key !== null && editHtml;
     return `
       <div class="spec-row">
         <div class="spec-label">${esc(label)}</div>
         <div class="spec-value">
           ${isEditing
             ? editHtml
-            : `<span>${displayValue}</span>${canEdit ? ` <button class="editlink" data-spec-edit="${key}">edit</button>` : ''}`}
+            : `<span>${displayValue}</span>${showEdit ? ` <button class="editlink" data-spec-edit="${key}">edit</button>` : ''}`}
         </div>
       </div>`;
   };
@@ -1005,6 +1062,53 @@ function renderSiteSpecPanel(site){
       ))}
       ${field('PUE', 'pue', (site.pue||0).toFixed(2), numberEdit('pue', site.pue, 1, 0.01))}
 
+      <div class="spec-section">Infrastructure</div>
+      ${field('Commissioned', 'commissioned_date',
+        site.commissionedDate ? esc(site.commissionedDate) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-commissioned_date" type="date" value="${esc(site.commissionedDate||'')}"/><button class="btn btn-primary btn-sm" data-spec-save="commissioned_date">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('HVAC units', 'hvac_units',
+        site.hvacUnits != null ? String(site.hvacUnits) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-hvac_units" type="number" min="0" step="1" value="${site.hvacUnits != null ? site.hvacUnits : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="hvac_units">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('HVAC TR / unit', 'hvac_tr_per_unit',
+        site.hvacTrPerUnit != null ? String(site.hvacTrPerUnit) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-hvac_tr_per_unit" type="number" min="0" step="0.1" value="${site.hvacTrPerUnit != null ? site.hvacTrPerUnit : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="hvac_tr_per_unit">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('Total HVAC (TR)', null,
+        (site.hvacUnits != null && site.hvacTrPerUnit != null)
+          ? String(site.hvacUnits * site.hvacTrPerUnit)
+          : '<span class="faint">—</span>',
+        ''
+      )}
+      ${field('UPS units', 'ups_units',
+        site.upsUnits != null ? String(site.upsUnits) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-ups_units" type="number" min="0" step="1" value="${site.upsUnits != null ? site.upsUnits : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="ups_units">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('UPS kVA / unit', 'ups_kva_per_unit',
+        site.upsKvaPerUnit != null ? String(site.upsKvaPerUnit) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-ups_kva_per_unit" type="number" min="0" step="1" value="${site.upsKvaPerUnit != null ? site.upsKvaPerUnit : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="ups_kva_per_unit">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('Total UPS (kVA)', null,
+        (site.upsUnits != null && site.upsKvaPerUnit != null)
+          ? String(site.upsUnits * site.upsKvaPerUnit)
+          : '<span class="faint">—</span>',
+        ''
+      )}
+      ${field('Generators', 'generator_units',
+        site.generatorUnits != null ? String(site.generatorUnits) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-generator_units" type="number" min="0" step="1" value="${site.generatorUnits != null ? site.generatorUnits : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="generator_units">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('Gen kVA / unit', 'generator_kva_per_unit',
+        site.generatorKvaPerUnit != null ? String(site.generatorKvaPerUnit) : '<span class="faint">—</span>',
+        `<div class="spec-edit"><input id="spec-input-generator_kva_per_unit" type="number" min="0" step="1" value="${site.generatorKvaPerUnit != null ? site.generatorKvaPerUnit : ''}"/><button class="btn btn-primary btn-sm" data-spec-save="generator_kva_per_unit">Save</button><button class="btn btn-sm" data-spec-cancel="1">&times;</button></div>`
+      )}
+      ${field('Total gen (kVA)', null,
+        (site.generatorUnits != null && site.generatorKvaPerUnit != null)
+          ? String(site.generatorUnits * site.generatorKvaPerUnit)
+          : '<span class="faint">—</span>',
+        ''
+      )}
       <div class="spec-section">Rack Status</div>
       <div class="spec-row"><div class="spec-label">Total racks</div><div class="spec-value mono">${totalRacks}</div></div>
       <div class="spec-row"><div class="spec-label">Populated</div><div class="spec-value mono" style="color:#1FA97A;">${populated}</div></div>
@@ -2381,6 +2485,7 @@ function closeModal(){
   state.addFloorSiteId=null; state.addFloorError=null;
   state.editDeviceId=null; state.editDeviceRackId=null; state.editDeviceSiteId=null; state.editDeviceError=null;
   state.userManagerData=null; state.userManagerError=null; state.userManagerLoading=false;
+  state.editingSiteSpecField=null; state.siteSpecError=null;
   renderModal();
 }
 
