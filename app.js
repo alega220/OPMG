@@ -991,12 +991,73 @@ async function updateSiteField(siteId, field, value){
 }
 
 /* ---------------------------------------------------------------
-   EXCEL EXPORT — client-side, uses SheetJS (lazy-loaded)
+   EXCEL EXPORT — client-side, uses ExcelJS (lazy-loaded)
+
+   Switched from SheetJS to ExcelJS: SheetJS's free/community build
+   can only WRITE plain, unstyled cells (no fills, fonts, borders,
+   or number formats) — that's why exports used to look flat and
+   themed exports need ExcelJS (or a paid SheetJS Pro license).
 --------------------------------------------------------------- */
+if (!window.loadExcelJS) {
+  window.loadExcelJS = function loadExcelJS(){
+    if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+    if (window.__exceljsLoading) return window.__exceljsLoading;
+    window.__exceljsLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+      s.onload = () => window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error('ExcelJS failed to initialize'));
+      s.onerror = () => reject(new Error('Could not load ExcelJS from CDN'));
+      document.head.appendChild(s);
+    });
+    return window.__exceljsLoading;
+  };
+}
+
+/* -------- Theme -------- */
+const XL_THEME = {
+  brand:        'FF1F4E78',   // dark navy — main title bars
+  section:      'FF2E75B6',   // medium blue — section header bars
+  tableHeader:  'FF1F4E78',   // dark navy — column header row
+  bandFill:     'FFF2F6FA',   // very light blue — banded rows
+  totalFill:    'FFDCE6F1',   // light blue — totals row
+  white:        'FFFFFFFF',
+  textDark:     'FF1A1A1A',
+  border:       'FFBFBFBF',
+};
+
+function xlSectionBar(ws, rowNum, text, span){
+  const row = ws.getRow(rowNum);
+  ws.mergeCells(rowNum, 1, rowNum, span);
+  row.getCell(1).value = text;
+  row.getCell(1).font = { bold: true, color: { argb: XL_THEME.white }, size: 11 };
+  row.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.section } };
+  row.getCell(1).alignment = { vertical: 'middle' };
+  row.height = 20;
+}
+
+function xlLabelValue(ws, rowNum, label, value, opts){
+  opts = opts || {};
+  const row = ws.getRow(rowNum);
+  row.getCell(1).value = label;
+  row.getCell(1).font = { bold: !!opts.bold, color: { argb: XL_THEME.textDark } };
+  row.getCell(2).value = value;
+  row.getCell(2).font = { bold: !!opts.bold, color: { argb: XL_THEME.textDark } };
+  row.getCell(2).alignment = { horizontal: 'right' };
+  if (opts.numFmt) row.getCell(2).numFmt = opts.numFmt;
+  if (opts.fill) {
+    row.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: opts.fill } };
+    row.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: opts.fill } };
+  }
+  if (opts.topBorder) {
+    row.getCell(1).border = { top: { style: 'thin', color: { argb: XL_THEME.border } } };
+    row.getCell(2).border = { top: { style: 'thin', color: { argb: XL_THEME.border } } };
+  }
+}
+
 async function exportPortfolioToExcel(){
-  let XLSX;
+  let ExcelJS;
   try {
-    XLSX = await window.loadSheetJS();
+    ExcelJS = await window.loadExcelJS();
   } catch(e){
     showToast('Could not load the Excel library — check your internet connection.', true);
     return;
@@ -1005,7 +1066,21 @@ async function exportPortfolioToExcel(){
   const sites = visibleSites();
   if(sites.length === 0){ showToast('No sites to export in this category.', true); return; }
 
-  const wb = XLSX.utils.book_new();
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Facility Ops';
+  wb.created = new Date();
+
+  // Create the Summary tab FIRST so it lands as sheet 1 — we populate it
+  // after the per-site loop below, once totals are known.
+  const summaryWs = wb.addWorksheet('Summary', {
+    views: [{ showGridLines: false, state: 'frozen', ySplit: 13 }],
+    properties: { tabColor: { argb: XL_THEME.brand } },
+  });
+  summaryWs.columns = [
+    { width: 24 }, { width: 20 }, { width: 12 },
+    { width: 18 }, { width: 16 }, { width: 14 }, { width: 20 },
+    { width: 12 }, { width: 14 }, { width: 12 }, { width: 18 }, { width: 20 },
+  ];
 
   /* -------- Compute per-site stats -------- */
   function siteStats(site){
@@ -1023,51 +1098,68 @@ async function exportPortfolioToExcel(){
 
   sites.forEach((site, idx) => {
     const st = siteStats(site);
-    const rows = [
-      [`Site Profile: ${site.name}`, ''],
-      ['', ''],
-      ['SITE SPECS', ''],
-      ['Site Name', site.name],
-      ['Location', site.location || ''],
-      ['Tier Rating', site.tier || ''],
-      ['Commissioned Date', site.commissionedDate || ''],
-      ['', ''],
-      ['POWER CAPACITY & IT LOAD', ''],
-      ['Total Facility Power Capacity (kVA)', st.totalCapacityKva],
-      ['Current IT Load (kVA)', st.currentItLoadKva],
-      ['IT Load Utilization %', st.totalCapacityKva > 0 ? st.currentItLoadKva / st.totalCapacityKva : 0],
-      ['Available Capacity Load (kVA)', st.totalCapacityKva - st.currentItLoadKva],
-      ['', ''],
-      ['HVAC / COOLING (ITAS)', ''],
-      ['Number of HVAC / ITAS Units', site.hvacUnits != null ? site.hvacUnits : ''],
-      ['Rating per Unit (TR)', site.hvacTrPerUnit != null ? site.hvacTrPerUnit : ''],
-      ['Total HVAC / ITAS Capacity (TR)',
-        (site.hvacUnits != null && site.hvacTrPerUnit != null) ? site.hvacUnits * site.hvacTrPerUnit : ''],
-      ['', ''],
-      ['UPS SYSTEMS', ''],
-      ['Number of UPS Units', site.upsUnits != null ? site.upsUnits : ''],
-      ['Capacity per UPS Unit (kVA)', site.upsKvaPerUnit != null ? site.upsKvaPerUnit : ''],
-      ['Total UPS Capacity (kVA)',
-        (site.upsUnits != null && site.upsKvaPerUnit != null) ? site.upsUnits * site.upsKvaPerUnit : ''],
-      ['', ''],
-      ['STANDBY GENERATORS', ''],
-      ['Number of Generators', site.generatorUnits != null ? site.generatorUnits : ''],
-      ['Capacity per Generator (kVA)', site.generatorKvaPerUnit != null ? site.generatorKvaPerUnit : ''],
-      ['Total Generator Capacity (kVA)',
-        (site.generatorUnits != null && site.generatorKvaPerUnit != null) ? site.generatorUnits * site.generatorKvaPerUnit : ''],
-      ['', ''],
-      ['RACK CAPACITY & UTILIZATION', ''],
-      ['Total Number of Racks', st.totalRacks],
-      ['Avg. Power Capacity per Rack (kW)', Math.round(st.avgRackKw * 100) / 100],
-      ['Total Rack Power Capacity (kW)', st.totalRacks * st.avgRackKw],
-      ['Utilized (Occupied) Racks', st.utilizedRacks],
-      ['Empty (Available) Racks', st.emptyRacks],
-      ['Rack Utilization %', st.totalRacks > 0 ? st.utilizedRacks / st.totalRacks : 0],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 42 }, { wch: 22 }];
     const tabName = `Site-${String(idx+1).padStart(2, '0')}`;
-    XLSX.utils.book_append_sheet(wb, ws, tabName);
+    const ws = wb.addWorksheet(tabName, {
+      views: [{ showGridLines: false }],
+      properties: { tabColor: { argb: XL_THEME.section } },
+    });
+    ws.columns = [{ width: 42 }, { width: 22 }];
+
+    // Title bar
+    ws.mergeCells('A1:B1');
+    ws.getCell('A1').value = `Site Profile: ${site.name}`;
+    ws.getCell('A1').font = { bold: true, size: 14, color: { argb: XL_THEME.white } };
+    ws.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.brand } };
+    ws.getCell('A1').alignment = { vertical: 'middle' };
+    ws.getRow(1).height = 26;
+
+    let r = 3;
+    xlSectionBar(ws, r++, 'SITE SPECS', 2);
+    xlLabelValue(ws, r++, 'Site Name', site.name);
+    xlLabelValue(ws, r++, 'Location', site.location || '');
+    xlLabelValue(ws, r++, 'Tier Rating', site.tier || '');
+    xlLabelValue(ws, r++, 'Commissioned Date', site.commissionedDate || '');
+    r++;
+
+    xlSectionBar(ws, r++, 'POWER CAPACITY & IT LOAD', 2);
+    xlLabelValue(ws, r++, 'Total Facility Power Capacity (kVA)', st.totalCapacityKva, { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Current IT Load (kVA)', st.currentItLoadKva, { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'IT Load Utilization %', st.totalCapacityKva > 0 ? st.currentItLoadKva / st.totalCapacityKva : 0, { numFmt: '0.0%' });
+    xlLabelValue(ws, r++, 'Available Capacity Load (kVA)', st.totalCapacityKva - st.currentItLoadKva, { numFmt: '#,##0.00', bold: true, topBorder: true });
+    r++;
+
+    xlSectionBar(ws, r++, 'HVAC / COOLING (ITAS)', 2);
+    xlLabelValue(ws, r++, 'Number of HVAC / ITAS Units', site.hvacUnits != null ? site.hvacUnits : '', { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Rating per Unit (TR)', site.hvacTrPerUnit != null ? site.hvacTrPerUnit : '', { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Total HVAC / ITAS Capacity (TR)',
+      (site.hvacUnits != null && site.hvacTrPerUnit != null) ? site.hvacUnits * site.hvacTrPerUnit : '',
+      { numFmt: '#,##0.00', bold: true, topBorder: true });
+    r++;
+
+    xlSectionBar(ws, r++, 'UPS SYSTEMS', 2);
+    xlLabelValue(ws, r++, 'Number of UPS Units', site.upsUnits != null ? site.upsUnits : '', { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Capacity per UPS Unit (kVA)', site.upsKvaPerUnit != null ? site.upsKvaPerUnit : '', { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Total UPS Capacity (kVA)',
+      (site.upsUnits != null && site.upsKvaPerUnit != null) ? site.upsUnits * site.upsKvaPerUnit : '',
+      { numFmt: '#,##0.00', bold: true, topBorder: true });
+    r++;
+
+    xlSectionBar(ws, r++, 'STANDBY GENERATORS', 2);
+    xlLabelValue(ws, r++, 'Number of Generators', site.generatorUnits != null ? site.generatorUnits : '', { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Capacity per Generator (kVA)', site.generatorKvaPerUnit != null ? site.generatorKvaPerUnit : '', { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Total Generator Capacity (kVA)',
+      (site.generatorUnits != null && site.generatorKvaPerUnit != null) ? site.generatorUnits * site.generatorKvaPerUnit : '',
+      { numFmt: '#,##0.00', bold: true, topBorder: true });
+    r++;
+
+    xlSectionBar(ws, r++, 'RACK CAPACITY & UTILIZATION', 2);
+    xlLabelValue(ws, r++, 'Total Number of Racks', st.totalRacks, { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Avg. Power Capacity per Rack (kW)', Math.round(st.avgRackKw * 100) / 100, { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Total Rack Power Capacity (kW)', st.totalRacks * st.avgRackKw, { numFmt: '#,##0.00' });
+    xlLabelValue(ws, r++, 'Utilized (Occupied) Racks', st.utilizedRacks, { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Empty (Available) Racks', st.emptyRacks, { numFmt: '#,##0' });
+    xlLabelValue(ws, r++, 'Rack Utilization %', st.totalRacks > 0 ? st.utilizedRacks / st.totalRacks : 0,
+      { numFmt: '0.0%', bold: true, topBorder: true });
 
     perSiteRows.push({
       tab: tabName,
@@ -1086,7 +1178,7 @@ async function exportPortfolioToExcel(){
     });
   });
 
-  /* -------- Summary sheet (prepend) -------- */
+  /* -------- Summary sheet (inserted first) -------- */
   const totals = perSiteRows.reduce((acc, r) => {
     acc.totalCapacityKva += r.totalCapacityKva;
     acc.itLoadKva += r.itLoadKva;
@@ -1098,49 +1190,84 @@ async function exportPortfolioToExcel(){
     return acc;
   }, { totalCapacityKva:0, itLoadKva:0, availableKva:0, totalRacks:0, utilizedRacks:0, emptyRacks:0, totalRackKw:0 });
 
-  const summaryRows = [
-    ['Datacenter Portfolio Summary — ' + (CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label : 'All Sites')],
-    [''],
-    ['PORTFOLIO TOTALS'],
-    ['Total IT Load Capacity (kVA)', totals.totalCapacityKva],
-    ['Total Current IT Load (kVA)', totals.itLoadKva],
-    ['Portfolio IT Load Utilization %', totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0],
-    ['Total Number of Racks', totals.totalRacks],
-    ['Total Utilized Racks', totals.utilizedRacks],
-    ['Total Empty Racks', totals.emptyRacks],
-    ['Portfolio Rack Utilization %', totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0],
-    [''],
-    ['SITE-BY-SITE DETAIL'],
-    ['Site', 'Location', 'Tier', 'Total Capacity (kVA)', 'IT Load (kVA)', 'Utilization %',
-     'Available Capacity (kVA)', 'Total Racks', 'Utilized Racks', 'Empty Racks',
-     'Rack Utilization %', 'Total Rack Capacity (kW)'],
-    ...perSiteRows.map(r => [
-      r.name, r.location, r.tier,
-      r.totalCapacityKva, r.itLoadKva, r.utilPct,
-      r.availableKva, r.totalRacks, r.utilizedRacks, r.emptyRacks,
-      r.rackUtilPct, r.totalRackKw,
-    ]),
-    ['PORTFOLIO TOTAL', '', '',
-      totals.totalCapacityKva, totals.itLoadKva,
-      totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0,
-      totals.availableKva, totals.totalRacks, totals.utilizedRacks, totals.emptyRacks,
-      totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0,
-      totals.totalRackKw],
-  ];
-  const summaryWs = XLSX.utils.aoa_to_sheet(summaryRows);
-  summaryWs['!cols'] = [
-    { wch: 38 }, { wch: 20 }, { wch: 12 },
-    { wch: 20 }, { wch: 18 }, { wch: 14 }, { wch: 22 },
-    { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 20 },
-  ];
-  // Prepend Summary to be the first sheet
-  wb.SheetNames.unshift('Summary');
-  wb.Sheets['Summary'] = summaryWs;
+  const catLabel = CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label : 'All Sites';
+
+  summaryWs.mergeCells('A1:L1');
+  summaryWs.getCell('A1').value = 'Datacenter Portfolio Summary — ' + catLabel;
+  summaryWs.getCell('A1').font = { bold: true, size: 15, color: { argb: XL_THEME.white } };
+  summaryWs.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.brand } };
+  summaryWs.getCell('A1').alignment = { vertical: 'middle' };
+  summaryWs.getRow(1).height = 28;
+
+  xlSectionBar(summaryWs, 3, 'PORTFOLIO TOTALS', 12);
+  xlLabelValue(summaryWs, 4, 'Total IT Load Capacity (kVA)', totals.totalCapacityKva, { numFmt: '#,##0.00' });
+  xlLabelValue(summaryWs, 5, 'Total Current IT Load (kVA)', totals.itLoadKva, { numFmt: '#,##0.00' });
+  xlLabelValue(summaryWs, 6, 'Portfolio IT Load Utilization %', totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0, { numFmt: '0.0%' });
+  xlLabelValue(summaryWs, 7, 'Total Number of Racks', totals.totalRacks, { numFmt: '#,##0' });
+  xlLabelValue(summaryWs, 8, 'Total Utilized Racks', totals.utilizedRacks, { numFmt: '#,##0' });
+  xlLabelValue(summaryWs, 9, 'Total Empty Racks', totals.emptyRacks, { numFmt: '#,##0' });
+  xlLabelValue(summaryWs, 10, 'Portfolio Rack Utilization %', totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0, { numFmt: '0.0%', bold: true, topBorder: true });
+
+  xlSectionBar(summaryWs, 12, 'SITE-BY-SITE DETAIL', 12);
+
+  const headerRow = summaryWs.getRow(13);
+  const headers = ['Site', 'Location', 'Tier', 'Total Capacity (kVA)', 'IT Load (kVA)', 'Utilization %',
+    'Available Capacity (kVA)', 'Total Racks', 'Utilized Racks', 'Empty Racks',
+    'Rack Utilization %', 'Total Rack Capacity (kW)'];
+  headers.forEach((h, i) => {
+    const cell = headerRow.getCell(i + 1);
+    cell.value = h;
+    cell.font = { bold: true, color: { argb: XL_THEME.white } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.tableHeader } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  });
+  headerRow.height = 30;
+
+  perSiteRows.forEach((r, i) => {
+    const row = summaryWs.getRow(14 + i);
+    const vals = [r.name, r.location, r.tier, r.totalCapacityKva, r.itLoadKva, r.utilPct,
+      r.availableKva, r.totalRacks, r.utilizedRacks, r.emptyRacks, r.rackUtilPct, r.totalRackKw];
+    vals.forEach((v, j) => { row.getCell(j + 1).value = v; });
+    [4,5,7,12].forEach(col => row.getCell(col).numFmt = '#,##0.00');
+    [6,11].forEach(col => row.getCell(col).numFmt = '0.0%');
+    [8,9,10].forEach(col => row.getCell(col).numFmt = '#,##0');
+    if (i % 2 === 1) {
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.bandFill } };
+      });
+    }
+  });
+
+  const totalRowNum = 14 + perSiteRows.length;
+  const totalRow = summaryWs.getRow(totalRowNum);
+  const totalVals = ['PORTFOLIO TOTAL', '', '',
+    totals.totalCapacityKva, totals.itLoadKva,
+    totals.totalCapacityKva > 0 ? totals.itLoadKva / totals.totalCapacityKva : 0,
+    totals.availableKva, totals.totalRacks, totals.utilizedRacks, totals.emptyRacks,
+    totals.totalRacks > 0 ? totals.utilizedRacks / totals.totalRacks : 0,
+    totals.totalRackKw];
+  totalVals.forEach((v, j) => { totalRow.getCell(j + 1).value = v; });
+  [4,5,7,12].forEach(col => totalRow.getCell(col).numFmt = '#,##0.00');
+  [6,11].forEach(col => totalRow.getCell(col).numFmt = '0.0%');
+  [8,9,10].forEach(col => totalRow.getCell(col).numFmt = '#,##0');
+  totalRow.eachCell({ includeEmpty: true }, cell => {
+    cell.font = { bold: true };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_THEME.totalFill } };
+    cell.border = { top: { style: 'medium', color: { argb: XL_THEME.brand } } };
+  });
+
+  summaryWs.autoFilter = { from: { row: 13, column: 1 }, to: { row: totalRowNum - 1, column: 12 } };
 
   /* -------- Download -------- */
   const cat = CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label.replace(/\s+/g,'_') : 'All';
   const filename = `Datacenter_Portfolio_${cat}_${new Date().toISOString().slice(0,10)}.xlsx`;
-  XLSX.writeFile(wb, filename);
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
   showToast(`Exported ${sites.length} site${sites.length === 1 ? '' : 's'} to ${filename}`);
 }
 function renderSiteSpecPanel(site){
