@@ -1435,8 +1435,15 @@ function renderSite(site){
   const floorRacks = racksForFloorPlan(site);
   const byRow = {};
   floorRacks.forEach(r=>{ (byRow[r.row] = byRow[r.row]||[]).push(r); });
-  const rowKeys = Object.keys(byRow).sort();
-  const floorHtml = `
+const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G'];
+const isWeAuto = site.id === 'we-auto';
+const rowKeys = Object.keys(byRow).sort((a,b)=>{
+  if(isWeAuto){
+    const ia = AUTO_ROW_ORDER.indexOf(a), ib = AUTO_ROW_ORDER.indexOf(b);
+    if(ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  }
+  return a.localeCompare(b, undefined, { numeric: true });
+});  const floorHtml = `
     <div class="floorlegend">
       <span><span class="legdot" style="background:#FFFFFF;border:1px solid var(--border);"></span>Available (empty)</span>
       <span><span class="legdot" style="background:#6C4EE3;"></span>Booked (customer, no devices)</span>
