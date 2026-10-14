@@ -224,14 +224,16 @@ async function loadData(){
     state.ready = true;
     return;
   }
+  /* === PDF CHANGES === */
   const [{data: siteRows, error: e1}, {data: rackRows, error: e2}, {data: deviceRows, error: e3}, {data: floorRows, error: e4}, {data: pdfRows, error: e5}] = await Promise.all([
-  fetchAllRows('sites'),
-  fetchAllRows('racks'),
-  fetchAllRows('devices'),
-  fetchAllRows('floors'),
-  fetchAllRows('pdf_breakers'),
-]);
+    fetchAllRows('sites'),
+    fetchAllRows('racks'),
+    fetchAllRows('devices'),
+    fetchAllRows('floors'),
+    fetchAllRows('pdf_breakers'),
+  ]);
   if(e1 || e2 || e3 || e4){ showToast('Failed to load data from Supabase — check console.', true); console.error(e1||e2||e3||e4); SITES=[]; state.ready=true; return; }
+  if(e5){ console.error('pdf_breakers load failed:', e5); }
 
   SITES = (siteRows||[]).map(s=>{
     const floors = (floorRows||[]).filter(f=>f.site_id===s.id).map(f=>({ id:f.id, name:f.name, position:Number(f.position||1) })).sort((a,b)=>a.position-b.position);
@@ -240,9 +242,12 @@ async function loadData(){
         id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         datasheetKva:Number(d.datasheet_kva), authorizedPerson:d.authorized_person,
       }));
-const rack = { id:r.name, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, floorId:r.floor_id||null, devices };      recomputeRack(rack);
+      const rack = { id:r.name, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, floorId:r.floor_id||null, devices };
+      recomputeRack(rack);
       return rack;
     });
+    /* === PDF CHANGES === */
+    const pdfBreakers = (pdfRows||[]).filter(p => p.site_id === s.id);
     const site = {
       id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue),
       category: s.category || 'colo',
@@ -253,7 +258,7 @@ const rack = { id:r.name, row:r.row_label, position:Number(r.position||0), capac
       upsKvaPerUnit: s.ups_kva_per_unit != null ? Number(s.ups_kva_per_unit) : null,
       generatorUnits: s.generator_units != null ? Number(s.generator_units) : null,
       generatorKvaPerUnit: s.generator_kva_per_unit != null ? Number(s.generator_kva_per_unit) : null,
-      floors, racks
+      floors, racks, pdfBreakers
     };
     recomputeSite(site);
     return site;
@@ -1407,6 +1412,87 @@ function renderSiteSpecPanel(site){
     </div>`;
 }
 
+/* === PDF CHANGES === */
+function renderPdfView(site){
+  const list = site.pdfBreakers || [];
+  if(!list.length){
+    return `<div class="card" style="padding:24px;text-align:center;color:var(--text3);">No PDF breakers loaded for this site.</div>`;
+  }
+  const pdfs = ['A1','A2','B1','B2'];
+
+  const rackUses = {};
+  site.racks.forEach(r=>{
+    if(!r.circuitBreaker) return;
+    const parts = String(r.circuitBreaker).split(';');
+    parts.forEach(part=>{
+      const m = part.match(/^\s*(A1|A2|B1|B2)\s*:\s*(.+)$/i);
+      if(!m) return;
+      const pdf = m[1].toUpperCase();
+      const brs = m[2].split(/&|,/).map(x=>x.trim()).filter(Boolean);
+      brs.forEach(b=>{
+        const key = `${pdf}::${b}`;
+        (rackUses[key] = rackUses[key] || []).push(r.id);
+      });
+    });
+  });
+
+  return pdfs.map(pdf=>{
+    const rows = list
+      .filter(b=>b.pdf===pdf)
+      .sort((a,b)=>a.breaker_no.localeCompare(b.breaker_no, undefined, { numeric:true }));
+    if(!rows.length) return '';
+
+    const totalCap = rows.reduce((s,b)=>s+(Number(b.capacity_a)||0),0);
+    const totalLoad = rows.reduce((s,b)=>s+(Number(b.load_a)||0),0);
+
+    return `
+    <div class="card" style="padding:16px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;">
+        <div class="sitename" style="font-size:16px;">PDF ${pdf}</div>
+        <div class="faint" style="font-size:12px;">
+          ${rows.length} breakers · total cap ${totalCap} A · total load ${totalLoad.toFixed(1)} A (${(totalLoad*53/1000).toFixed(2)} kW)
+        </div>
+      </div>
+      <div style="max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:8px;">
+        <table class="inv" style="width:100%;">
+          <thead><tr>
+            <th>Breaker No.</th><th class="num">Capacity (A)</th><th class="num">Cable (mm²)</th>
+            <th class="num">Load (A)</th><th class="num">Load (kW)</th><th class="num">Loading %</th>
+            <th>Status</th><th>Notes</th><th>Racks listing this breaker</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map(b=>{
+              const cap = Number(b.capacity_a)||0;
+              const load = Number(b.load_a)||0;
+              const kw = load*53/1000;
+              const pct = cap>0 ? load/cap : null;
+              const key = `${pdf}::${b.breaker_no}`;
+              const usedBy = rackUses[key] || [];
+              let status;
+              if(pct!==null && pct>0.8) status = `<span class="badge red">High</span>`;
+              else if(pct!==null) status = `<span class="badge green">OK</span>`;
+              else if(load>0) status = `<span class="badge amber">No capacity</span>`;
+              else if(usedBy.length>0) status = `<span class="badge amber">No reading</span>`;
+              else status = `<span class="badge">Spare</span>`;
+              return `<tr>
+                <td class="mono">${esc(b.breaker_no)}</td>
+                <td class="num">${cap||''}</td>
+                <td class="num">${b.cable_mm2 || ''}</td>
+                <td class="num">${b.load_a!=null ? Number(b.load_a).toFixed(1) : ''}</td>
+                <td class="num">${b.load_a!=null ? kw.toFixed(3) : ''}</td>
+                <td class="num">${pct!=null ? (pct*100).toFixed(1)+'%' : ''}</td>
+                <td>${status}</td>
+                <td class="faint" style="font-size:11.5px;">${esc(b.notes||'')}</td>
+                <td class="faint" style="font-size:11.5px;">${usedBy.length? esc(usedBy.join(', ')) : ''}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function renderSite(site){
   const racks = filteredSortedRacks(site);
 
@@ -1503,6 +1589,7 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
         <div class="subtabs">
           <button class="subtab ${state.siteSub==='floor'?'active':''}" data-sub="floor">Floor plan</button>
           <button class="subtab ${state.siteSub==='list'?'active':''}" data-sub="list">Rack list</button>
+          ${(site.pdfBreakers && site.pdfBreakers.length) ? `<button class="subtab ${state.siteSub==='pdfs'?'active':''}" data-sub="pdfs">PDFs</button>` : ''}
         </div>
 
         <div class="toolrow">
@@ -1515,7 +1602,9 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
           </select>` : ''}
         </div>
 
-        ${state.siteSub==='floor' ? floorHtml : listHtml}
+        ${state.siteSub==='floor' ? floorHtml
+          : state.siteSub==='pdfs' ? renderPdfView(site)
+          : listHtml}
       </div>
       <aside class="site-side">
         ${renderSiteSpecPanel(site)}
