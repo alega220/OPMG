@@ -1435,7 +1435,7 @@ function renderSite(site){
   const floorRacks = racksForFloorPlan(site);
   const byRow = {};
   floorRacks.forEach(r=>{ (byRow[r.row] = byRow[r.row]||[]).push(r); });
-const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G'];
+const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G','PDF'];
 const isWeAuto = site.id === 'we-auto';
 const rowKeys = Object.keys(byRow).sort((a,b)=>{
   if(isWeAuto){
