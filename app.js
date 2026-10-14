@@ -239,8 +239,7 @@ async function loadData(){
         id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         datasheetKva:Number(d.datasheet_kva), authorizedPerson:d.authorized_person,
       }));
-      const rack = { id:r.id, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, floorId:r.floor_id||null, devices };
-      recomputeRack(rack);
+const rack = { id:r.name, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, floorId:r.floor_id||null, devices };      recomputeRack(rack);
       return rack;
     });
     const site = {
