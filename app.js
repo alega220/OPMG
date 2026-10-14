@@ -224,12 +224,13 @@ async function loadData(){
     state.ready = true;
     return;
   }
-  const [{data: siteRows, error: e1}, {data: rackRows, error: e2}, {data: deviceRows, error: e3}, {data: floorRows, error: e4}] = await Promise.all([
-    fetchAllRows('sites'),
-    fetchAllRows('racks'),
-    fetchAllRows('devices'),
-    fetchAllRows('floors'),
-  ]);
+  const [{data: siteRows, error: e1}, {data: rackRows, error: e2}, {data: deviceRows, error: e3}, {data: floorRows, error: e4}, {data: pdfRows, error: e5}] = await Promise.all([
+  fetchAllRows('sites'),
+  fetchAllRows('racks'),
+  fetchAllRows('devices'),
+  fetchAllRows('floors'),
+  fetchAllRows('pdf_breakers'),
+]);
   if(e1 || e2 || e3 || e4){ showToast('Failed to load data from Supabase — check console.', true); console.error(e1||e2||e3||e4); SITES=[]; state.ready=true; return; }
 
   SITES = (siteRows||[]).map(s=>{
