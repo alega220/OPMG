@@ -855,8 +855,8 @@ function renderDashboard(){
 
     <div class="sitegrid">
       ${sites.map(s=>`
-        <div class="card sitecard" data-open-site="${s.id}">
-          <div class="sitecard-top">
+<div class="card sitecard" data-open-site="${s.id}" role="button" tabindex="0">
+<div class="sitecard-top">
             <div><div class="sitename">${s.name}</div><div class="siteloc">${esc(s.location)}</div></div>
             <span class="badge ${statusColor(s.utilizationPct)}">${statusLabel(s.utilizationPct)}</span>
           </div>
@@ -1554,7 +1554,8 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
                 const lastDash = id.lastIndexOf('-');
                 return lastDash >= 0 ? id.slice(lastDash + 1) : id;
               })();
-              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
+              return `
+              <div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" role="button" tabindex="0" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
             }).join('')}
           </div>
         </div>
@@ -3033,9 +3034,23 @@ async function handleAddFloorSubmit(e){
 }
 
 function attachHandlers(){
-  rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
-    el.addEventListener('click', ()=>{ state.view='site'; state.siteId=el.getAttribute('data-open-site'); state.search=''; state.sort='name'; state.siteSub='floor'; state.selectedFloorId=null; render(); });
+ rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
+  const openSite = () => {
+    state.view='site';
+    state.siteId = el.getAttribute('data-open-site');
+    state.search=''; state.sort='name'; state.siteSub='floor'; state.selectedFloorId=null;
+    render();
+  };
+  el.addEventListener('click', (e)=>{
+    if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
+    openSite();
   });
+  el.addEventListener('touchend', (e)=>{
+    if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
+    e.preventDefault();
+    openSite();
+  });
+});
   rootEl.querySelectorAll('[data-back]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.view='dashboard'; state.siteId=null; render(); });
   });
@@ -3053,13 +3068,22 @@ function attachHandlers(){
     renderModal();
   });
   rootEl.querySelectorAll('[data-open-rack]').forEach(el=>{
-    el.addEventListener('click', ()=>{
-      const site = SITES.find(s=>s.id===state.siteId);
-      const rack = site.racks.find(r=>r.id===el.getAttribute('data-open-rack'));
-      state.modalRack = rack; state.modalSiteId = site.id; state.rackFace='front'; state.modalType='rack';
-      renderModal();
-    });
+  const openRack = () => {
+    const site = SITES.find(s=>s.id===state.siteId);
+    const rack = site.racks.find(r=>r.id===el.getAttribute('data-open-rack'));
+    state.modalRack = rack; state.modalSiteId = site.id; state.rackFace='front'; state.modalType='rack';
+    renderModal();
+  };
+  el.addEventListener('click', (e)=>{
+    if(e.target.closest('button, a')) return;
+    openRack();
   });
+  el.addEventListener('touchend', (e)=>{
+    if(e.target.closest('button, a')) return;
+    e.preventDefault();
+    openRack();
+  });
+});
   if(isEngineer()){
     rootEl.querySelectorAll('.racktile[draggable="true"]').forEach(el=>{
       el.addEventListener('dragstart', (e)=>{
