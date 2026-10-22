@@ -2,7 +2,7 @@
    FACILITY OPS — app.js
    Runs in DEMO MODE (mock data, no login) when config.js is blank,
    or LIVE MODE (Supabase auth + persistence) when SUPABASE_URL /
-   SUPABASE_ANON_KEY are filled in.
+   SUPABASE_ANON_KEY are filled in. 
 
    v3: site categories (colo / inhouse) with entry picker
        + site spec panel with inline editing
