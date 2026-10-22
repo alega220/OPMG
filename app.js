@@ -2,18 +2,21 @@
    FACILITY OPS — app.js
    Runs in DEMO MODE (mock data, no login) when config.js is blank,
    or LIVE MODE (Supabase auth + persistence) when SUPABASE_URL /
-   SUPABASE_ANON_KEY are filled in. 
+   SUPABASE_ANON_KEY are filled in.
 
-   v3: site categories (colo / inhouse) with entry picker
+   v4: site categories (colo / inhouse) with entry picker
        + site spec panel with inline editing
        + rack-id tile labels on floor plan
+       + PDF breaker tables per site
+       + mobile tap fixes
+       + NULL-safe rack name handling
 ================================================================== */
 
 const LIVE = Boolean(window.SUPABASE_URL && window.SUPABASE_ANON_KEY);
 const sb = LIVE ? window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY) : null;
 
 /* ---------------------------------------------------------------
-   SEEDED RNG + MOCK DATA (demo mode, and used to seed a live DB)
+   SEEDED RNG + MOCK DATA
 --------------------------------------------------------------- */
 function mulberry32(seed){
   return function(){
@@ -50,7 +53,6 @@ const SITE_DEFS = [
   {id:"d40",name:"D40",location:"6th of October — Bldg 40",tier:"Tier IV",rackCount:132,caps:[8,10,15,20],category:"inhouse"},
 ];
 
-/* ---------- Category constants ---------- */
 const CATEGORIES = {
   colo:    { label: 'Colocation',  icon: '🏢', desc: 'Customer-hosted racks and shared facilities' },
   inhouse: { label: 'In-House',    icon: '🏠', desc: 'Company-owned and operated facilities' },
@@ -102,7 +104,7 @@ function generateSite(def){
 }
 
 /* ---------------------------------------------------------------
-   AGGREGATE HELPERS (shared by demo + live)
+   AGGREGATE HELPERS
 --------------------------------------------------------------- */
 function recomputeRack(rack){
   rack.totalDatasheetKva = rack.devices.reduce((s,d)=>s+d.datasheetKva,0);
@@ -224,7 +226,6 @@ async function loadData(){
     state.ready = true;
     return;
   }
-  /* === PDF CHANGES === */
   const [{data: siteRows, error: e1}, {data: rackRows, error: e2}, {data: deviceRows, error: e3}, {data: floorRows, error: e4}, {data: pdfRows, error: e5}] = await Promise.all([
     fetchAllRows('sites'),
     fetchAllRows('racks'),
@@ -242,11 +243,22 @@ async function loadData(){
         id:d.id, startU:d.start_u, sizeU:d.size_u, model:d.model, serialNumber:d.serial_number||'',
         datasheetKva:Number(d.datasheet_kva), authorizedPerson:d.authorized_person,
       }));
-      const rack = { id:r.name, row:r.row_label, position:Number(r.position||0), capacityKva:Number(r.capacity_kva), actualKva:Number(r.actual_kva||0), circuitBreaker:r.circuit_breaker||null, customer:r.customer||null, activationDate:r.activation_date||null, floorId:r.floor_id||null, devices };
+      const rack = {
+        id: r.name || r.id || '',              /* NULL-safe */
+        uuid: r.id,                            /* keep UUID for FK lookups */
+        row: r.row_label || '',
+        position: Number(r.position||0),
+        capacityKva: Number(r.capacity_kva),
+        actualKva: Number(r.actual_kva||0),
+        circuitBreaker: r.circuit_breaker||null,
+        customer: r.customer||null,
+        activationDate: r.activation_date||null,
+        floorId: r.floor_id||null,
+        devices
+      };
       recomputeRack(rack);
       return rack;
     });
-    /* === PDF CHANGES === */
     const pdfBreakers = (pdfRows||[]).filter(p => p.site_id === s.id);
     const site = {
       id:s.id, name:s.name, location:s.location, tier:s.tier, pue:Number(s.pue),
@@ -271,12 +283,12 @@ async function seedDemoDataToSupabase(){
   showToast('Seeding demo data — this can take a minute…');
   const demo = SITE_DEFS.map(generateSite);
   for(const site of demo){
-    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue, category:site.category || 'colo' });
-    const rackRows = site.racks.map(r=>({ id:r.id, site_id:site.id, row_label:r.row, capacity_kva:r.capacityKva, actual_kva:r.actualKva, position:r.position }));
+    await sb.from('sites').upsert({ id:site.id, name:site.name, location:site.location, tier:site.tier, pue:site.pue, category:site.category || 'colo', type: site.category || 'colo' });
+    const rackRows = site.racks.map(r=>({ name:r.id, site_id:site.id, row_label:r.row, capacity_kva:r.capacityKva, actual_kva:r.actualKva, position:r.position }));
     for(let i=0;i<rackRows.length;i+=500) await sb.from('racks').upsert(rackRows.slice(i,i+500));
     let deviceRows = [];
     site.racks.forEach(r=>r.devices.forEach(d=>{
-      deviceRows.push({ rack_id:r.id, start_u:d.startU, size_u:d.sizeU, model:d.model, serial_number:d.serialNumber, datasheet_kva:d.datasheetKva, authorized_person:d.authorizedPerson, created_by: state.user.id });
+      deviceRows.push({ rack_id:r.uuid || r.id, start_u:d.startU, size_u:d.sizeU, model:d.model, serial_number:d.serialNumber, datasheet_kva:d.datasheetKva, authorized_person:d.authorizedPerson, created_by: state.user.id });
     }));
     for(let i=0;i<deviceRows.length;i+=500) await sb.from('devices').insert(deviceRows.slice(i,i+500));
   }
@@ -293,7 +305,7 @@ async function addDevice({ siteId, rackId, model, sizeU, serialNumber, datasheet
 
   if(LIVE){
     const { data, error } = await sb.from('devices').insert({
-      rack_id: rackId, start_u: freeStart, size_u: sizeU, model, serial_number: serialNumber,
+      rack_id: rack.uuid || rack.id, start_u: freeStart, size_u: sizeU, model, serial_number: serialNumber,
       datasheet_kva: datasheetKva, authorized_person: authorizedPerson,
       created_by: state.user.id,
     }).select().single();
@@ -380,7 +392,7 @@ async function updateRackCapacity(siteId, rackId, newCapacityKva){
   const rack = site.racks.find(r=>r.id===rackId);
   const oldCapacityKva = rack.capacityKva;
   if(LIVE){
-    const { error } = await sb.from('racks').update({ capacity_kva: newCapacityKva }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ capacity_kva: newCapacityKva }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'capacity_changed', `${oldCapacityKva} kVA -> ${newCapacityKva} kVA`);
@@ -395,7 +407,7 @@ async function updateRackActual(siteId, rackId, newActualKva){
   const rack = site.racks.find(r=>r.id===rackId);
   const oldActualKva = rack.actualKva;
   if(LIVE){
-    const { error } = await sb.from('racks').update({ actual_kva: newActualKva }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ actual_kva: newActualKva }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'actual_changed', `${oldActualKva} kVA -> ${newActualKva} kVA`);
@@ -410,7 +422,7 @@ async function updateRackBreaker(siteId, rackId, newBreaker){
   const rack = site.racks.find(r=>r.id===rackId);
   const oldBreaker = rack.circuitBreaker;
   if(LIVE){
-    const { error } = await sb.from('racks').update({ circuit_breaker: newBreaker || null }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ circuit_breaker: newBreaker || null }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'breaker_changed', `${oldBreaker||'—'} -> ${newBreaker||'—'}`);
@@ -424,7 +436,7 @@ async function updateRackCustomer(siteId, rackId, newCustomer){
   const rack = site.racks.find(r=>r.id===rackId);
   const oldCustomer = rack.customer;
   if(LIVE){
-    const { error } = await sb.from('racks').update({ customer: newCustomer || null }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ customer: newCustomer || null }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'customer_changed', `${oldCustomer||'—'} -> ${newCustomer||'—'}`);
@@ -438,7 +450,7 @@ async function updateRackActivation(siteId, rackId, newDate){
   const rack = site.racks.find(r=>r.id===rackId);
   const oldDate = rack.activationDate;
   if(LIVE){
-    const { error } = await sb.from('racks').update({ activation_date: newDate || null }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ activation_date: newDate || null }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'activation_changed', `${oldDate||'—'} -> ${newDate||'—'}`);
@@ -464,7 +476,7 @@ async function moveRack(siteId, rackId, targetRow, beforeRackId){
   const oldRow = rack.row;
 
   if(LIVE){
-    const { error } = await sb.from('racks').update({ row_label: targetRow, position: newPosition }).eq('id', rackId);
+    const { error } = await sb.from('racks').update({ row_label: targetRow, position: newPosition }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else if(oldRow !== targetRow){
     pushDemoHistory(rack, 'rack_moved', `Row ${oldRow} -> Row ${targetRow}`);
@@ -481,7 +493,7 @@ async function renameRack(siteId, oldId, newId){
   if(SITES.some(s=>s.racks.some(r=>r.id===newId))) return { error:`Rack name "${newId}" is already in use.` };
 
   if(LIVE){
-    const { error } = await sb.from('racks').update({ id: newId }).eq('id', oldId);
+    const { error } = await sb.from('racks').update({ name: newId }).eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   } else {
     pushDemoHistory(rack, 'rack_renamed', `${oldId} -> ${newId}`);
@@ -504,7 +516,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
 
   let floorId;
   if(LIVE){
-    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue, category: cat });
+    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue, category: cat, type: cat });
     if(e1) return { error: e1.message };
     const { data: floorData, error: eF } = await sb.from('floors').insert({ site_id:id, name:'Floor 1', position:1 }).select().single();
     if(eF) return { error: eF.message };
@@ -521,7 +533,8 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
   }
 
   if(LIVE){
-    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:id, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
+    /* FIX: insert into `name` (not `id`) so racks get a readable name. */
+    const rackRows = rackDefs.map(r=>({ name:r.id, site_id:id, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
     for(let i=0;i<rackRows.length;i+=500){
       const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
       if(e2) return { error: e2.message };
@@ -545,12 +558,14 @@ async function addRackToSite(siteId, { rackId, row, capacityKva, circuitBreaker,
   const position = siblings.length ? Math.max(...siblings.map(r=>r.position||0)) + 1 : 0;
   const useFloorId = floorId || (site.floors[0] && site.floors[0].id) || null;
 
+  let insertedUuid = null;
   if(LIVE){
-    const { error } = await sb.from('racks').insert({ id:rackId, site_id:siteId, row_label:row, position, capacity_kva:capacityKva, actual_kva:0, circuit_breaker:circuitBreaker||null, floor_id:useFloorId });
+    const { data, error } = await sb.from('racks').insert({ name:rackId, site_id:siteId, row_label:row, position, capacity_kva:capacityKva, actual_kva:0, circuit_breaker:circuitBreaker||null, floor_id:useFloorId }).select().single();
     if(error) return { error: error.message };
+    insertedUuid = data.id;
   }
 
-  const rack = { id:rackId, row, position, capacityKva, actualKva:0, circuitBreaker:circuitBreaker||null, customer:null, activationDate:null, floorId:useFloorId, devices:[], history:[] };
+  const rack = { id:rackId, uuid:insertedUuid, row, position, capacityKva, actualKva:0, circuitBreaker:circuitBreaker||null, customer:null, activationDate:null, floorId:useFloorId, devices:[], history:[] };
   recomputeRack(rack);
   site.racks.push(rack);
   recomputeSite(site);
@@ -589,7 +604,7 @@ async function addFloorToSite(siteId, { name, rackCount, rowCount, defaultCapaci
   }
 
   if(LIVE){
-    const rackRows = rackDefs.map(r=>({ id:r.id, site_id:siteId, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
+    const rackRows = rackDefs.map(r=>({ name:r.id, site_id:siteId, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
     for(let i=0;i<rackRows.length;i+=500){
       const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
       if(e2) return { error: e2.message };
@@ -608,8 +623,9 @@ async function addFloorToSite(siteId, { name, rackCount, rowCount, defaultCapaci
 async function removeRack(siteId, rackId){
   const site = SITES.find(s=>s.id===siteId);
   if(!site) return { error:'Site not found.' };
+  const rack = site.racks.find(r=>r.id===rackId);
   if(LIVE){
-    const { error } = await sb.from('racks').delete().eq('id', rackId);
+    const { error } = await sb.from('racks').delete().eq('id', rack.uuid || rack.id);
     if(error) return { error: error.message };
   }
   site.racks = site.racks.filter(r=>r.id!==rackId);
@@ -630,7 +646,7 @@ async function updateSiteInfo(siteId, { name, location, tier, pue, category }){
   const site = SITES.find(s=>s.id===siteId);
   const cat = (category && CATEGORY_KEYS.includes(category)) ? category : (site.category || 'colo');
   if(LIVE){
-    const { error } = await sb.from('sites').update({ name, location, tier, pue, category: cat }).eq('id', siteId);
+    const { error } = await sb.from('sites').update({ name, location, tier, pue, category: cat, type: cat }).eq('id', siteId);
     if(error) return { error: error.message };
   }
   site.name = name; site.location = location; site.tier = tier; site.pue = pue; site.category = cat;
@@ -659,7 +675,7 @@ async function loadRackHistory(rackId){
 }
 
 /* ---------------------------------------------------------------
-   USER MANAGEMENT (admin only, live mode)
+   USER MANAGEMENT
 --------------------------------------------------------------- */
 async function fetchUserManagerData(){
   const [{data: profiles, error:e1}, {data: assignments, error:e2}] = await Promise.all([
@@ -692,7 +708,7 @@ async function setSiteAssignment(userId, siteId, assign){
 }
 
 /* ---------------------------------------------------------------
-   AUTH (live mode only)
+   AUTH
 --------------------------------------------------------------- */
 async function initAuth(){
   if(!LIVE) return;
@@ -855,8 +871,8 @@ function renderDashboard(){
 
     <div class="sitegrid">
       ${sites.map(s=>`
-<div class="card sitecard" data-open-site="${s.id}" role="button" tabindex="0">
-<div class="sitecard-top">
+        <div class="card sitecard" data-open-site="${s.id}" role="button" tabindex="0">
+          <div class="sitecard-top">
             <div><div class="sitename">${s.name}</div><div class="siteloc">${esc(s.location)}</div></div>
             <span class="badge ${statusColor(s.utilizationPct)}">${statusLabel(s.utilizationPct)}</span>
           </div>
@@ -884,7 +900,7 @@ function renderDashboard(){
 }
 
 /* ---------------------------------------------------------------
-   SITE VIEW (floor plan / list)
+   SITE VIEW
 --------------------------------------------------------------- */
 function activeFloorId(site){
   if(!site.floors || site.floors.length===0) return null;
@@ -897,13 +913,14 @@ function filteredSortedRacks(site){
   let list = floorId ? site.racks.filter(r=>r.floorId===floorId) : site.racks;
   if(state.search.trim()){
     const q = state.search.trim().toLowerCase();
-    list = list.filter(r => r.id.toLowerCase().includes(q) ||
+    list = list.filter(r => String(r.id||'').toLowerCase().includes(q) ||
       r.devices.some(d=>d.model.toLowerCase().includes(q) || d.authorizedPerson.toLowerCase().includes(q)));
   }
   const sorted = [...list];
-  if(state.sort==='name') sorted.sort((a,b)=>a.id.localeCompare(b.id));
-  if(state.sort==='util_desc') sorted.sort((a,b)=>(b.actualKva/b.capacityKva)-(a.actualKva/a.capacityKva));
-  if(state.sort==='util_asc') sorted.sort((a,b)=>(a.actualKva/a.capacityKva)-(b.actualKva/b.capacityKva));
+  /* NULL-safe sort to avoid crashes on racks with a missing name. */
+  if(state.sort==='name') sorted.sort((a,b)=>String(a.id||'').localeCompare(String(b.id||'')));
+  if(state.sort==='util_desc') sorted.sort((a,b)=>(b.actualKva/Math.max(1,b.capacityKva))-(a.actualKva/Math.max(1,a.capacityKva)));
+  if(state.sort==='util_asc') sorted.sort((a,b)=>(a.actualKva/Math.max(1,a.capacityKva))-(b.actualKva/Math.max(1,b.capacityKva)));
   return sorted;
 }
 
@@ -912,7 +929,7 @@ function racksForFloorPlan(site){
   let list = floorId ? site.racks.filter(r=>r.floorId===floorId) : site.racks;
   if(state.search.trim()){
     const q = state.search.trim().toLowerCase();
-    list = list.filter(r => r.id.toLowerCase().includes(q) ||
+    list = list.filter(r => String(r.id||'').toLowerCase().includes(q) ||
       r.devices.some(d=>d.model.toLowerCase().includes(q) || d.authorizedPerson.toLowerCase().includes(q)));
   }
   return [...list].sort((a,b)=>(a.position||0)-(b.position||0));
@@ -935,7 +952,7 @@ async function updateSiteField(siteId, field, value){
     const n = parseFloat(value);
     if(isNaN(n) || n < 1) return { error:'PUE must be 1 or greater.' };
     patch.pue = n;
-    } else if(field === 'category'){
+  } else if(field === 'category'){
     if(!CATEGORY_KEYS.includes(value)) return { error:'Invalid category.' };
     patch.category = value;
   } else if(field === 'commissioned_date'){
@@ -996,12 +1013,7 @@ async function updateSiteField(siteId, field, value){
 }
 
 /* ---------------------------------------------------------------
-   EXCEL EXPORT — client-side, uses ExcelJS (lazy-loaded)
-
-   Switched from SheetJS to ExcelJS: SheetJS's free/community build
-   can only WRITE plain, unstyled cells (no fills, fonts, borders,
-   or number formats) — that's why exports used to look flat and
-   themed exports need ExcelJS (or a paid SheetJS Pro license).
+   EXCEL EXPORT
 --------------------------------------------------------------- */
 if (!window.loadExcelJS) {
   window.loadExcelJS = function loadExcelJS(){
@@ -1018,13 +1030,12 @@ if (!window.loadExcelJS) {
   };
 }
 
-/* -------- Theme -------- */
 const XL_THEME = {
-  brand:        'FF1F4E78',   // dark navy — main title bars
-  section:      'FF2E75B6',   // medium blue — section header bars
-  tableHeader:  'FF1F4E78',   // dark navy — column header row
-  bandFill:     'FFF2F6FA',   // very light blue — banded rows
-  totalFill:    'FFDCE6F1',   // light blue — totals row
+  brand:        'FF1F4E78',
+  section:      'FF2E75B6',
+  tableHeader:  'FF1F4E78',
+  bandFill:     'FFF2F6FA',
+  totalFill:    'FFDCE6F1',
   white:        'FFFFFFFF',
   textDark:     'FF1A1A1A',
   border:       'FFBFBFBF',
@@ -1075,8 +1086,6 @@ async function exportPortfolioToExcel(){
   wb.creator = 'Facility Ops';
   wb.created = new Date();
 
-  // Create the Summary tab FIRST so it lands as sheet 1 — we populate it
-  // after the per-site loop below, once totals are known.
   const summaryWs = wb.addWorksheet('Summary', {
     views: [{ showGridLines: false, state: 'frozen', ySplit: 13 }],
     properties: { tabColor: { argb: XL_THEME.brand } },
@@ -1087,7 +1096,6 @@ async function exportPortfolioToExcel(){
     { width: 12 }, { width: 14 }, { width: 12 }, { width: 18 }, { width: 20 },
   ];
 
-  /* -------- Compute per-site stats -------- */
   function siteStats(site){
     const totalCapacityKva = site.racks.reduce((s,r) => s + Number(r.capacityKva || 0), 0);
     const currentItLoadKva = site.racks.reduce((s,r) => s + Number(r.actualKva || 0), 0);
@@ -1098,8 +1106,7 @@ async function exportPortfolioToExcel(){
     return { totalCapacityKva, currentItLoadKva, totalRacks, utilizedRacks, emptyRacks, avgRackKw };
   }
 
-  /* -------- One sheet per site -------- */
-  const perSiteRows = [];   // for the summary table
+  const perSiteRows = [];
 
   sites.forEach((site, idx) => {
     const st = siteStats(site);
@@ -1110,7 +1117,6 @@ async function exportPortfolioToExcel(){
     });
     ws.columns = [{ width: 42 }, { width: 22 }];
 
-    // Title bar
     ws.mergeCells('A1:B1');
     ws.getCell('A1').value = `Site Profile: ${site.name}`;
     ws.getCell('A1').font = { bold: true, size: 14, color: { argb: XL_THEME.white } };
@@ -1183,7 +1189,6 @@ async function exportPortfolioToExcel(){
     });
   });
 
-  /* -------- Summary sheet (inserted first) -------- */
   const totals = perSiteRows.reduce((acc, r) => {
     acc.totalCapacityKva += r.totalCapacityKva;
     acc.itLoadKva += r.itLoadKva;
@@ -1263,7 +1268,6 @@ async function exportPortfolioToExcel(){
 
   summaryWs.autoFilter = { from: { row: 13, column: 1 }, to: { row: totalRowNum - 1, column: 12 } };
 
-  /* -------- Download -------- */
   const cat = CATEGORIES[state.siteCategory] ? CATEGORIES[state.siteCategory].label.replace(/\s+/g,'_') : 'All';
   const filename = `Datacenter_Portfolio_${cat}_${new Date().toISOString().slice(0,10)}.xlsx`;
   const buffer = await wb.xlsx.writeBuffer();
@@ -1275,6 +1279,7 @@ async function exportPortfolioToExcel(){
   URL.revokeObjectURL(url);
   showToast(`Exported ${sites.length} site${sites.length === 1 ? '' : 's'} to ${filename}`);
 }
+
 function renderSiteSpecPanel(site){
   const totalRacks = site.racks.length;
   const populated = site.racks.filter(r => r.devices.length > 0).length;
@@ -1287,7 +1292,7 @@ function renderSiteSpecPanel(site){
   const err = state.siteSpecError;
   const canEdit = isEngineer();
 
-    const field = (label, key, displayValue, editHtml) => {
+  const field = (label, key, displayValue, editHtml) => {
     const isEditing = editing === key && key !== null;
     const showEdit = canEdit && key !== null && editHtml;
     return `
@@ -1412,7 +1417,9 @@ function renderSiteSpecPanel(site){
     </div>`;
 }
 
-/* === PDF CHANGES === */
+/* ---------------------------------------------------------------
+   PDF VIEW
+--------------------------------------------------------------- */
 function renderPdfView(site){
   const list = site.pdfBreakers || [];
   if(!list.length){
@@ -1439,7 +1446,7 @@ function renderPdfView(site){
   return pdfs.map(pdf=>{
     const rows = list
       .filter(b=>b.pdf===pdf)
-      .sort((a,b)=>a.breaker_no.localeCompare(b.breaker_no, undefined, { numeric:true }));
+      .sort((a,b)=>String(a.breaker_no||'').localeCompare(String(b.breaker_no||''), undefined, { numeric:true }));
     if(!rows.length) return '';
 
     const totalCap = rows.reduce((s,b)=>s+(Number(b.capacity_a)||0),0);
@@ -1493,6 +1500,9 @@ function renderPdfView(site){
   }).join('');
 }
 
+/* ---------------------------------------------------------------
+   SITE VIEW
+--------------------------------------------------------------- */
 function renderSite(site){
   const racks = filteredSortedRacks(site);
 
@@ -1522,15 +1532,17 @@ function renderSite(site){
   const floorRacks = racksForFloorPlan(site);
   const byRow = {};
   floorRacks.forEach(r=>{ (byRow[r.row] = byRow[r.row]||[]).push(r); });
-const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G','PDF'];
-const isWeAuto = site.id === 'we-auto';
-const rowKeys = Object.keys(byRow).sort((a,b)=>{
-  if(isWeAuto){
-    const ia = AUTO_ROW_ORDER.indexOf(a), ib = AUTO_ROW_ORDER.indexOf(b);
-    if(ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-  }
-  return a.localeCompare(b, undefined, { numeric: true });
-});  const floorHtml = `
+  const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G','PDF'];
+  const isWeAuto = site.id === 'we-auto';
+  const rowKeys = Object.keys(byRow).sort((a,b)=>{
+    if(isWeAuto){
+      const ia = AUTO_ROW_ORDER.indexOf(a), ib = AUTO_ROW_ORDER.indexOf(b);
+      if(ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    }
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const floorHtml = `
     <div class="floorlegend">
       <span><span class="legdot" style="background:#FFFFFF;border:1px solid var(--border);"></span>Available (empty)</span>
       <span><span class="legdot" style="background:#6C4EE3;"></span>Booked (customer, no devices)</span>
@@ -1554,8 +1566,7 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
                 const lastDash = id.lastIndexOf('-');
                 return lastDash >= 0 ? id.slice(lastDash + 1) : id;
               })();
-              return `
-              <div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" role="button" tabindex="0" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
+              return `<div class="racktile" draggable="${isEngineer()}" data-open-rack="${r.id}" data-rack-id="${r.id}" role="button" tabindex="0" style="background:${v.bg};border:${v.border};color:${v.text};" title="${esc(v.title)} (${esc(r.id)})">${esc(tileLabel)}</div>`;
             }).join('')}
           </div>
         </div>
@@ -1572,7 +1583,7 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${isEngineer() ? `<button class="btn" data-add-rack="${site.id}">+ Add rack</button>` : ''}
-         <button class="btn" id="exportExcelBtn" title="Download this category's sites as an Excel workbook">📥 Export Excel</button>
+        <button class="btn" id="exportExcelBtn" title="Download this category's sites as an Excel workbook">📥 Export Excel</button>
         ${isEngineer() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
         ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
@@ -1615,7 +1626,7 @@ const rowKeys = Object.keys(byRow).sort((a,b)=>{
 }
 
 /* ---------------------------------------------------------------
-   RACK MODAL (elevation + inventory + capacity setup + remove)
+   RACK MODAL
 --------------------------------------------------------------- */
 function initials(name){
   const clean = String(name).split('—')[0].trim();
@@ -1664,7 +1675,7 @@ function renderRackModal(rack, site){
         <span>Power density</span><div class="density-bar"></div><span>Low → High (kVA/U)</span>
       </div>`;
   } else {
-    const pduA = rack.actualKva/2 * (0.92 + (hashStr(rack.id)%17)/100);
+    const pduA = rack.actualKva/2 * (0.92 + (hashStr(rack.id||'x')%17)/100);
     const pduB = rack.actualKva - pduA;
     elevationHtml = `
       <div style="width:230px;">
@@ -1844,7 +1855,6 @@ function renderRackModal(rack, site){
                 </tr>
               </tfoot>
             </table>
-
           </div>
         </div>
       </div>
@@ -1857,7 +1867,7 @@ function renderRackModal(rack, site){
 --------------------------------------------------------------- */
 function renderAddDeviceModal(){
   const site = SITES.find(s=>s.id===state.addDeviceSiteId) || SITES[0];
-  const rackOptions = [...site.racks].sort((a,b)=>a.id.localeCompare(b.id));
+  const rackOptions = [...site.racks].sort((a,b)=>String(a.id||'').localeCompare(String(b.id||'')));
   const preselectRack = state.addDeviceRackId && rackOptions.some(r=>r.id===state.addDeviceRackId) ? state.addDeviceRackId : (rackOptions[0]?rackOptions[0].id:'');
   const deviceNames = DEVICE_TYPES.map(t=>t.name);
 
@@ -1927,7 +1937,7 @@ function renderAddDeviceModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT DEVICE MODAL (engineers + admins)
+   EDIT DEVICE MODAL
 --------------------------------------------------------------- */
 function renderEditDeviceModal(){
   const site = SITES.find(s=>s.id===state.editDeviceSiteId);
@@ -1992,7 +2002,7 @@ function renderEditDeviceModal(){
 }
 
 /* ---------------------------------------------------------------
-   MANAGE USERS MODAL (admin only)
+   USER MANAGER MODAL
 --------------------------------------------------------------- */
 function renderUserManagerModal(){
   const loading = state.userManagerLoading;
@@ -2116,7 +2126,7 @@ function wireUserManagerModal(){
 }
 
 /* ---------------------------------------------------------------
-   ADD SITE MODAL (admin only) — with category selector
+   ADD SITE MODAL
 --------------------------------------------------------------- */
 function renderAddSiteModal(){
   const defaultCat = state.siteCategory || 'colo';
@@ -2241,7 +2251,7 @@ function renderAddFloorModal(){
 }
 
 /* ---------------------------------------------------------------
-   EDIT SITE MODAL — with category selector
+   EDIT SITE MODAL
 --------------------------------------------------------------- */
 function renderEditSiteModal(){
   const site = SITES.find(s=>s.id===state.editSiteId);
@@ -2357,7 +2367,7 @@ function renderAddRackModal(){
 }
 
 /* ---------------------------------------------------------------
-   RACK HISTORY MODAL
+   HISTORY MODAL
 --------------------------------------------------------------- */
 const HISTORY_LABELS = { device_added:'Added', device_removed:'Removed', device_edited:'Edited', capacity_changed:'Capacity', actual_changed:'Actual', breaker_changed:'Breaker', customer_changed:'Customer', activation_changed:'Activation', rack_moved:'Moved', rack_renamed:'Renamed' };
 const HISTORY_COLORS = { device_added:'green', device_removed:'red', device_edited:'amber', capacity_changed:'amber', actual_changed:'amber', breaker_changed:'amber', customer_changed:'purple', activation_changed:'purple', rack_moved:'amber', rack_renamed:'amber' };
@@ -2868,7 +2878,7 @@ function closeModal(){
 }
 
 /* ---------------------------------------------------------------
-   HISTORY OVERLAY (stacks on top of the rack modal)
+   HISTORY OVERLAY
 --------------------------------------------------------------- */
 let historyModalRoot;
 async function openHistory(rack){
@@ -3034,23 +3044,24 @@ async function handleAddFloorSubmit(e){
 }
 
 function attachHandlers(){
- rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
-  const openSite = () => {
-    state.view='site';
-    state.siteId = el.getAttribute('data-open-site');
-    state.search=''; state.sort='name'; state.siteSub='floor'; state.selectedFloorId=null;
-    render();
-  };
-  el.addEventListener('click', (e)=>{
-    if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
-    openSite();
+  /* site cards: click + touchend, guarded against inner buttons */
+  rootEl.querySelectorAll('[data-open-site]').forEach(el=>{
+    const openSite = () => {
+      state.view='site';
+      state.siteId = el.getAttribute('data-open-site');
+      state.search=''; state.sort='name'; state.siteSub='floor'; state.selectedFloorId=null;
+      render();
+    };
+    el.addEventListener('click', (e)=>{
+      if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
+      openSite();
+    });
+    el.addEventListener('touchend', (e)=>{
+      if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
+      e.preventDefault();
+      openSite();
+    });
   });
-  el.addEventListener('touchend', (e)=>{
-    if(e.target.closest('button, a, [data-add-device], [data-remove-site]')) return;
-    e.preventDefault();
-    openSite();
-  });
-});
   rootEl.querySelectorAll('[data-back]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.view='dashboard'; state.siteId=null; render(); });
   });
@@ -3067,23 +3078,27 @@ function attachHandlers(){
     state.modalType = 'addFloor';
     renderModal();
   });
+
+  /* rack tiles: click + touchend */
   rootEl.querySelectorAll('[data-open-rack]').forEach(el=>{
-  const openRack = () => {
-    const site = SITES.find(s=>s.id===state.siteId);
-    const rack = site.racks.find(r=>r.id===el.getAttribute('data-open-rack'));
-    state.modalRack = rack; state.modalSiteId = site.id; state.rackFace='front'; state.modalType='rack';
-    renderModal();
-  };
-  el.addEventListener('click', (e)=>{
-    if(e.target.closest('button, a')) return;
-    openRack();
+    const openRack = () => {
+      const site = SITES.find(s=>s.id===state.siteId);
+      const rack = site.racks.find(r=>r.id===el.getAttribute('data-open-rack'));
+      if(!rack) return;
+      state.modalRack = rack; state.modalSiteId = site.id; state.rackFace='front'; state.modalType='rack';
+      renderModal();
+    };
+    el.addEventListener('click', (e)=>{
+      if(e.target.closest('button, a')) return;
+      openRack();
+    });
+    el.addEventListener('touchend', (e)=>{
+      if(e.target.closest('button, a')) return;
+      e.preventDefault();
+      openRack();
+    });
   });
-  el.addEventListener('touchend', (e)=>{
-    if(e.target.closest('button, a')) return;
-    e.preventDefault();
-    openRack();
-  });
-});
+
   if(isEngineer()){
     rootEl.querySelectorAll('.racktile[draggable="true"]').forEach(el=>{
       el.addEventListener('dragstart', (e)=>{
@@ -3170,10 +3185,8 @@ function attachHandlers(){
   const ss = document.getElementById('sortsel');
   if(ss) ss.addEventListener('change', ()=>{ state.sort = ss.value; render(); });
 
-     // Excel export button
   const exportBtn = document.getElementById('exportExcelBtn');
   if(exportBtn) exportBtn.addEventListener('click', exportPortfolioToExcel);
-  // Site spec panel inline editing
   rootEl.querySelectorAll('[data-spec-edit]').forEach(el=>{
     el.addEventListener('click', ()=>{
       state.editingSiteSpecField = el.getAttribute('data-spec-edit');
