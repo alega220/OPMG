@@ -386,3 +386,24 @@ table.inv tfoot td.num{text-align:right;font-family:var(--mono);}
   background: #fff;
 }
 .spec-edit .btn-sm { padding: 4px 7px; font-size: 11px; }
+
+
+/* ---------- mobile polish ---------- */
+@media (max-width: 720px){
+  .topbar{height:auto;min-height:54px;padding:8px 12px;flex-wrap:wrap;gap:6px 10px;}
+  .navmeta{flex-wrap:wrap;gap:8px;font-size:12px;margin-left:auto;}
+  .navemail{display:none;}
+  .wrap{padding:18px 14px 50px;}
+  .overlay{padding:16px 10px;}
+  .modal{padding:18px 16px;}
+  input, select, textarea{font-size:16px !important;}   /* stops iPhone zooming the page when a field is tapped */
+  .btn{padding:10px 14px;}
+  .modal-close{width:40px;height:40px;font-size:18px;}
+}
+@media (max-width: 480px){
+  .field-row{grid-template-columns:1fr;}
+}
+@media (pointer: coarse){
+  .racktile{width:44px;height:40px;font-size:10.5px;}
+  .racktile:hover{transform:none;}
+}
