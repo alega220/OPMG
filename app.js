@@ -27,6 +27,19 @@ function mulberry32(seed){
   };
 }
 function hashStr(s){ let h=0; for(let i=0;i<s.length;i++) h=(Math.imul(31,h)+s.charCodeAt(i))|0; return h; }
+/* A..Z, then AA, AB, ... (row labels used to turn into [ \\ ] after Z) */
+function rowLabel(n){ let out=''; n=Math.floor(n); do { out = String.fromCharCode(65 + (n % 26)) + out; n = Math.floor(n/26) - 1; } while(n >= 0); return out; }
+/* Sort rows A..Z, AA, AB.. correctly. Only used when EVERY row label is 1-3 letters;
+   sites with custom row names keep the old ordering. */
+function rowsAreLetters(list){ return list.every(x=>/^[A-Za-z]{1,3}$/.test(String(x||''))); }
+function rowCompareFor(list){
+  const letters = rowsAreLetters(list);
+  return (a,b)=>{
+    a=String(a||''); b=String(b||'');
+    if(letters && a.length!==b.length) return a.length-b.length;
+    return a.localeCompare(b, undefined, { numeric:true });
+  };
+}
 function rand(rng,min,max){ return min + rng()*(max-min); }
 function pick(rng,arr){ return arr[Math.floor(rng()*arr.length)]; }
 
@@ -85,7 +98,7 @@ function generateRack(rng, siteId, idx, caps, rowLen){
     devices.push({id:`demo-${siteId}-${idx}-${devices.length}`, startU:curU, sizeU:t.size, model:t.name, serialNumber:genSerial(rng), datasheetKva:power*rand(rng,1.25,1.7), authorizedPerson:pick(rng,PEOPLE)});
     curU += t.size; curPower += power;
   }
-  const row = String.fromCharCode(65 + Math.floor((idx-1)/rowLen));
+  const row = rowLabel(Math.floor((idx-1)/rowLen));
   const position = (idx-1) % rowLen;
   return { id:`${siteId.toUpperCase()}-R${String(idx).padStart(3,"0")}`, row, position, capacityKva, actualKva:Math.round(curPower*100)/100, circuitBreaker:null, customer:null, activationDate:null, devices };
 }
@@ -186,7 +199,7 @@ const state = {
   editingBreaker:false,
   editingCustomer:false, editingActivation:false,
   editingRackName:false, rackNameError:null,
-  addSiteError:null,
+  addSiteError:null, addSiteForm:null,
   editSiteId:null, editSiteError:null,
   addRackSiteId:null, addRackError:null,
   addFloorSiteId:null, addFloorError:null,
@@ -509,17 +522,50 @@ function slugify(name){
   return id;
 }
 
-async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category }){
-  const id = slugify(name);
+function slugBase(text){
+  return String(text||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+}
+
+async function createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category, code }){
+  /* The site id is also used in rack names (E55-R001), so it must contain English letters/numbers.
+     Arabic or other names need a site code. */
+  const base = slugBase(code) || slugBase(name);
+  if(!base) return { error:'Enter a site code using English letters or numbers (it is used in rack names, e.g. E55-R001).' };
+  let id = base, n = 1;
+  while(SITES.some(s=>s.id===id)){ id = `${base}-${++n}`; }
   const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
   const cat = (category && CATEGORY_KEYS.includes(category)) ? category : 'colo';
 
   let floorId;
+  let siteInserted = false;
+  /* If anything fails after the site row exists, remove ONLY what this call just created. */
+  async function rollback(){
+    if(!LIVE || !siteInserted) return true;
+    let ok = true;
+    for(const [table, col] of [['racks','site_id'],['floors','site_id'],['sites','id']]){
+      const { error } = await sb.from(table).delete().eq(col, id);
+      if(error){ ok = false; console.error(`Rollback of ${table} failed:`, error); }
+    }
+    return ok;
+  }
+  async function fail(message){
+    const clean = await rollback();
+    return { error: clean ? `${message} Nothing was saved - please try again.`
+                          : `${message} Some partial data may remain for "${id}" - refresh the page and check.` };
+  }
+
   if(LIVE){
-    const { error: e1 } = await sb.from('sites').insert({ id, name, location, tier, pue, category: cat, type: cat });
-    if(e1) return { error: e1.message };
+    let lastErr = null;
+    for(let attempt=0; attempt<5 && !siteInserted; attempt++){
+      const { error } = await sb.from('sites').insert({ id, name, location, tier, pue, category: cat, type: cat });
+      if(!error){ siteInserted = true; break; }
+      lastErr = error;
+      if(error.code === '23505'){ id = `${base}-${++n}`; continue; }   /* id already taken: try the next one */
+      break;
+    }
+    if(!siteInserted) return { error: lastErr ? lastErr.message : 'Could not create the site.' };
     const { data: floorData, error: eF } = await sb.from('floors').insert({ site_id:id, name:'Floor 1', position:1 }).select().single();
-    if(eF) return { error: eF.message };
+    if(eF) return await fail(`Could not create the floor (${eF.message}).`);
     floorId = floorData.id;
   } else {
     floorId = 'demo-floor-1';
@@ -527,17 +573,16 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, defa
 
   const rackDefs = [];
   for(let i=1;i<=rackCount;i++){
-    const row = String.fromCharCode(65 + Math.floor((i-1)/racksPerRow));
+    const row = rowLabel(Math.floor((i-1)/racksPerRow));
     const position = (i-1) % racksPerRow;
     rackDefs.push({ id:`${id.toUpperCase()}-R${String(i).padStart(3,'0')}`, row, position, capacityKva:defaultCapacityKva, actualKva:0, circuitBreaker:null, customer:null, activationDate:null, floorId });
   }
 
   if(LIVE){
-    /* FIX: insert into `name` (not `id`) so racks get a readable name. */
     const rackRows = rackDefs.map(r=>({ name:r.id, site_id:id, row_label:r.row, position:r.position, capacity_kva:r.capacityKva, actual_kva:0, floor_id:r.floorId }));
     for(let i=0;i<rackRows.length;i+=500){
       const { error: e2 } = await sb.from('racks').insert(rackRows.slice(i,i+500));
-      if(e2) return { error: e2.message };
+      if(e2) return await fail(`Could not create the racks (${e2.message}).`);
     }
   }
 
@@ -588,14 +633,15 @@ async function addFloorToSite(siteId, { name, rackCount, rowCount, defaultCapaci
   }
   const floor = { id:floorId, name, position };
 
-  const usedLetters = new Set(site.racks.map(r=>(r.row||'').toUpperCase().charAt(0)).filter(Boolean));
-  let startCode = 65;
-  while(usedLetters.has(String.fromCharCode(startCode))) startCode++;
+  const usedRows = new Set(site.racks.map(r=>String(r.row||'').toUpperCase()).filter(Boolean));
+  const usedLetters = new Set([...usedRows].map(x=>x.charAt(0)));
+  let startIdx = 0;
+  while(usedRows.has(rowLabel(startIdx)) || (rowLabel(startIdx).length===1 && usedLetters.has(rowLabel(startIdx)))) startIdx++;
 
   const racksPerRow = Math.max(1, Math.ceil(rackCount / rowCount));
   const rackDefs = [];
   for(let i=1;i<=rackCount;i++){
-    const row = String.fromCharCode(startCode + Math.floor((i-1)/racksPerRow));
+    const row = rowLabel(startIdx + Math.floor((i-1)/racksPerRow));
     const rowIndex = (i-1) % racksPerRow + 1;
     rackDefs.push({ id:`${site.id.toUpperCase()}-${row}${String(rowIndex).padStart(2,'0')}`, row, position:rowIndex-1, capacityKva:defaultCapacityKva, actualKva:0, circuitBreaker:null, customer:null, activationDate:null, floorId });
   }
@@ -1534,12 +1580,13 @@ function renderSite(site){
   floorRacks.forEach(r=>{ (byRow[r.row] = byRow[r.row]||[]).push(r); });
   const AUTO_ROW_ORDER = ['O','A','A"','B','C','D','E','F','G','PDF'];
   const isWeAuto = site.id === 'we-auto';
+  const rowCmp = rowCompareFor(Object.keys(byRow));
   const rowKeys = Object.keys(byRow).sort((a,b)=>{
     if(isWeAuto){
       const ia = AUTO_ROW_ORDER.indexOf(a), ib = AUTO_ROW_ORDER.indexOf(b);
       if(ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
     }
-    return a.localeCompare(b, undefined, { numeric: true });
+    return rowCmp(a,b);
   });
 
   const floorHtml = `
@@ -2129,7 +2176,10 @@ function wireUserManagerModal(){
    ADD SITE MODAL
 --------------------------------------------------------------- */
 function renderAddSiteModal(){
-  const defaultCat = state.siteCategory || 'colo';
+  const f = state.addSiteForm || {};
+  const defaultCat = f.category || state.siteCategory || 'colo';
+  const tierSel = f.tier || 'Tier III';
+  const v = (x, d) => esc(x !== undefined && x !== null ? x : d);
   return `
   <div class="overlay" id="overlay">
     <div class="modal" style="max-width:520px;">
@@ -2144,19 +2194,26 @@ function renderAddSiteModal(){
       ${state.addSiteError ? `<div class="form-error">${esc(state.addSiteError)}</div>` : ''}
 
       <form id="addSiteForm">
-        <div class="field">
-          <label>Site name</label>
-          <input id="sName" placeholder="e.g. E55" autocomplete="off"/>
+        <div class="field-row">
+          <div class="field">
+            <label>Site name</label>
+            <input id="sName" placeholder="e.g. E55" autocomplete="off" value="${v(f.name,'')}"/>
+          </div>
+          <div class="field">
+            <label>Site code (optional)</label>
+            <input id="sCode" placeholder="e.g. E55" autocomplete="off" value="${v(f.code,'')}"/>
+          </div>
         </div>
+        <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">The code is used in rack names (E55-R001). Leave empty to use the site name. Required if the name is not in English letters.</div>
         <div class="field-row">
           <div class="field">
             <label>Location</label>
-            <input id="sLocation" placeholder="e.g. Cairo — Bldg 55" autocomplete="off"/>
+            <input id="sLocation" placeholder="e.g. Cairo — Bldg 55" autocomplete="off" value="${v(f.location,'')}"/>
           </div>
           <div class="field">
             <label>Tier</label>
             <select id="sTier">
-              <option>Tier I</option><option>Tier II</option><option selected>Tier III</option><option>Tier IV</option>
+              ${['Tier I','Tier II','Tier III','Tier IV'].map(t=>`<option ${t===tierSel?'selected':''}>${t}</option>`).join('')}
             </select>
           </div>
         </div>
@@ -2171,22 +2228,22 @@ function renderAddSiteModal(){
         <div class="field-row">
           <div class="field">
             <label>Number of racks</label>
-            <input id="sRackCount" type="number" min="1" max="2000" step="1" value="40"/>
+            <input id="sRackCount" type="number" min="1" max="2000" step="1" value="${v(f.rackCount,'40')}"/>
           </div>
           <div class="field">
             <label>Number of rows</label>
-            <input id="sRowCount" type="number" min="1" max="200" step="1" value="4"/>
+            <input id="sRowCount" type="number" min="1" max="200" step="1" value="${v(f.rowCount,'4')}"/>
           </div>
         </div>
 
         <div class="field-row">
           <div class="field">
             <label>Maximum power per rack (kVA)</label>
-            <input id="sCapacity" type="number" min="0.5" step="0.5" value="10"/>
+            <input id="sCapacity" type="number" min="0.5" step="0.5" value="${v(f.capacity,'10')}"/>
           </div>
           <div class="field">
             <label>PUE</label>
-            <input id="sPue" type="number" min="1" step="0.01" value="1.4"/>
+            <input id="sPue" type="number" min="1" step="0.01" value="${v(f.pue,'1.4')}"/>
           </div>
         </div>
         <div class="faint" style="font-size:11.5px;margin:-6px 0 14px;">Applied to every rack at creation — each rack's max power can still be adjusted individually afterward.</div>
@@ -2313,7 +2370,7 @@ function renderEditSiteModal(){
 --------------------------------------------------------------- */
 function renderAddRackModal(){
   const site = SITES.find(s=>s.id===state.addRackSiteId);
-  const existingRows = [...new Set(site.racks.map(r=>r.row))].sort();
+  const existingRows = (()=>{ const l=[...new Set(site.racks.map(r=>r.row))]; return rowsAreLetters(l) ? l.sort(rowCompareFor(l)) : l.sort(); })();
   const suggestedId = `${site.id.toUpperCase()}-R${String(site.racks.length+1).padStart(3,'0')}`;
   return `
   <div class="overlay" id="overlay">
@@ -2611,7 +2668,7 @@ function renderTopbarMeta(){
     topbarMeta.innerHTML = `
       ${catLabel ? `<span class="cat-chip" id="switchCatBtn" title="Click to switch category">${catIcon} ${esc(catLabel)}</span>` : ''}
       <span class="role-tag ${roleCssClass}">${state.role}</span>
-      <span>${esc(state.user.email)}</span>
+      <span class="navemail">${esc(state.user.email)}</span>
       ${isAdmin() ? `<button class="editlink" id="openUserManager" style="margin-left:8px;">Manage users</button>` : ''}
       <button class="signout-link" id="signOutBtn">Sign out</button>
     `;
@@ -2654,6 +2711,16 @@ function updateNavActive(){
   document.getElementById('navAnalysis').classList.toggle('active', state.view==='analysis');
 }
 
+function bindOverlayClose(){
+  const ov = document.getElementById('overlay');
+  if(!ov) return;
+  let downOnOverlay = false;
+  const down = e => { downOnOverlay = (e.target === ov); };
+  ov.addEventListener('mousedown', down);
+  ov.addEventListener('touchstart', down, { passive:true });
+  ov.addEventListener('click', e => { if(e.target === ov && downOnOverlay) closeModal(); downOnOverlay = false; });
+}
+
 function renderModal(){
   if(!modalRoot){ modalRoot = document.createElement('div'); document.body.appendChild(modalRoot); }
   if(!state.modalType){ modalRoot.innerHTML=''; return; }
@@ -2662,7 +2729,7 @@ function renderModal(){
     const site = SITES.find(s=>s.id===state.modalSiteId);
     const rack = site.racks.find(r=>r.id===state.modalRack.id);
     modalRoot.innerHTML = renderRackModal(rack, site);
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     modalRoot.querySelectorAll('[data-face]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ state.rackFace = btn.getAttribute('data-face'); renderModal(); });
@@ -2801,7 +2868,7 @@ function renderModal(){
 
   if(state.modalType==='addDevice'){
     modalRoot.innerHTML = renderAddDeviceModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelAddDevice').addEventListener('click', closeModal);
     document.getElementById('fSite').addEventListener('change', (e)=>{ state.addDeviceSiteId = e.target.value; state.addDeviceRackId=null; state.addDeviceError=null; renderModal(); });
@@ -2811,7 +2878,7 @@ function renderModal(){
 
   if(state.modalType==='addSite'){
     modalRoot.innerHTML = renderAddSiteModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelAddSite').addEventListener('click', closeModal);
     document.getElementById('addSiteForm').addEventListener('submit', handleAddSiteSubmit);
@@ -2820,7 +2887,7 @@ function renderModal(){
 
   if(state.modalType==='editSite'){
     modalRoot.innerHTML = renderEditSiteModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelEditSite').addEventListener('click', closeModal);
     document.getElementById('editSiteForm').addEventListener('submit', handleEditSiteSubmit);
@@ -2829,7 +2896,7 @@ function renderModal(){
 
   if(state.modalType==='addRack'){
     modalRoot.innerHTML = renderAddRackModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelAddRack').addEventListener('click', closeModal);
     document.getElementById('addRackForm').addEventListener('submit', handleAddRackSubmit);
@@ -2838,7 +2905,7 @@ function renderModal(){
 
   if(state.modalType==='addFloor'){
     modalRoot.innerHTML = renderAddFloorModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelAddFloor').addEventListener('click', closeModal);
     document.getElementById('addFloorForm').addEventListener('submit', handleAddFloorSubmit);
@@ -2847,7 +2914,7 @@ function renderModal(){
 
   if(state.modalType==='editDevice'){
     modalRoot.innerHTML = renderEditDeviceModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     document.getElementById('cancelEditDevice').addEventListener('click', closeModal);
     document.getElementById('editDeviceForm').addEventListener('submit', handleEditDeviceSubmit);
@@ -2855,7 +2922,7 @@ function renderModal(){
 
   if(state.modalType==='userManager'){
     modalRoot.innerHTML = renderUserManagerModal();
-    document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModal(); });
+    bindOverlayClose();
     document.getElementById('closeModal').addEventListener('click', closeModal);
     wireUserManagerModal();
   }
@@ -2864,7 +2931,7 @@ function renderModal(){
 function closeModal(){
   state.modalRack=null; state.modalSiteId=null; state.rackFace='front';
   state.modalType=null; state.addDeviceSiteId=null; state.addDeviceRackId=null; state.addDeviceError=null;
-  state.editingCapacity=false; state.capacityError=null; state.addSiteError=null;
+  state.editingCapacity=false; state.capacityError=null; state.addSiteError=null; state.addSiteForm=null;
   state.editingActual=false; state.actualError=null; state.editingBreaker=false;
   state.editingCustomer=false; state.editingActivation=false;
   state.editingRackName=false; state.rackNameError=null;
@@ -2956,28 +3023,52 @@ async function handleEditDeviceSubmit(e){
   render();
 }
 
+let creatingSite = false;
 async function handleAddSiteSubmit(e){
   e.preventDefault();
-  const name = document.getElementById('sName').value.trim();
-  const location = document.getElementById('sLocation').value.trim();
-  const tier = document.getElementById('sTier').value;
-  const category = document.getElementById('sCategory').value;
-  const rackCount = parseInt(document.getElementById('sRackCount').value, 10);
-  const rowCount = parseInt(document.getElementById('sRowCount').value, 10);
-  const defaultCapacityKva = parseFloat(document.getElementById('sCapacity').value);
-  const pue = parseFloat(document.getElementById('sPue').value);
+  if(creatingSite) return;                       /* ignore double taps while a site is being created */
+  const val = id => document.getElementById(id).value;
+  const name = val('sName').trim();
+  const code = val('sCode').trim();
+  const location = val('sLocation').trim();
+  const tier = val('sTier');
+  const category = val('sCategory');
+  const rackCount = parseInt(val('sRackCount'), 10);
+  const rowCount = parseInt(val('sRowCount'), 10);
+  const defaultCapacityKva = parseFloat(val('sCapacity'));
+  const pue = parseFloat(val('sPue'));
+
+  /* remember everything typed so an error does not wipe the form */
+  state.addSiteForm = { name, code, location, tier, category, rackCount: val('sRackCount'), rowCount: val('sRowCount'), capacity: val('sCapacity'), pue: val('sPue') };
 
   if(!name){ state.addSiteError='Enter a site name.'; renderModal(); return; }
+  if(!slugBase(code) && !slugBase(name)){ state.addSiteError='Enter a site code using English letters or numbers (it is used in rack names, e.g. E55-R001).'; renderModal(); return; }
   if(!Number.isInteger(rackCount) || rackCount<1 || rackCount>2000){ state.addSiteError='Number of racks must be a whole number between 1 and 2000.'; renderModal(); return; }
   if(!Number.isInteger(rowCount) || rowCount<1 || rowCount>rackCount){ state.addSiteError='Number of rows must be a whole number between 1 and the number of racks.'; renderModal(); return; }
   if(isNaN(defaultCapacityKva) || defaultCapacityKva<=0){ state.addSiteError='Enter a valid default rack capacity greater than 0.'; renderModal(); return; }
   if(isNaN(pue) || pue<1){ state.addSiteError='PUE must be 1 or greater.'; renderModal(); return; }
 
-  const res = await createSite({ name, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category });
+  const btn = document.querySelector('#addSiteForm button[type="submit"]');
+  creatingSite = true;
+  if(btn){ btn.disabled = true; btn.textContent = rackCount > 300 ? 'Creating… (this can take a few seconds)' : 'Creating…'; }
+  let res;
+  try {
+    res = await createSite({ name, code, location, tier, pue, rackCount, rowCount, defaultCapacityKva, category });
+  } catch(err){
+    console.error(err);
+    res = { error: (err && err.message) ? err.message : 'Unexpected error while creating the site.' };
+  }
+  creatingSite = false;
   if(res.error){ state.addSiteError = res.error; renderModal(); return; }
 
+  state.addSiteForm = null;
   closeModal();
-  showToast(`${name} created with ${rackCount} racks.`);
+  const created = res.site.category;
+  if(state.siteCategory && created !== state.siteCategory){
+    showToast(`${name} created in ${CATEGORIES[created].label} — switch category to see it.`);
+  } else {
+    showToast(`${name} created with ${rackCount} racks.`);
+  }
   render();
 }
 
@@ -3154,7 +3245,7 @@ function attachHandlers(){
     });
   });
   const openAddSite = document.getElementById('openAddSite');
-  if(openAddSite) openAddSite.addEventListener('click', ()=>{ state.addSiteError=null; state.modalType='addSite'; renderModal(); });
+  if(openAddSite) openAddSite.addEventListener('click', ()=>{ state.addSiteError=null; state.addSiteForm=null; state.modalType='addSite'; renderModal(); });
   const openEditSite = document.getElementById('openEditSite');
   if(openEditSite) openEditSite.addEventListener('click', ()=>{ state.editSiteId=state.siteId; state.editSiteError=null; state.modalType='editSite'; renderModal(); });
   rootEl.querySelectorAll('[data-add-rack]').forEach(el=>{
