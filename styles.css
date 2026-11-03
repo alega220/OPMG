@@ -407,3 +407,24 @@ table.inv tfoot td.num{text-align:right;font-family:var(--mono);}
   .racktile{width:44px;height:40px;font-size:10.5px;}
   .racktile:hover{transform:none;}
 }
+
+
+/* ---------- import devices from Excel ---------- */
+.sitehead{flex-wrap:wrap;gap:10px;}
+.sitehead > div:last-child{flex-wrap:wrap;}
+.imp-step{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border);}
+.imp-step:last-of-type{border-bottom:none;}
+.imp-num{flex:0 0 auto;width:24px;height:24px;border-radius:50%;background:var(--purple-bg2);color:var(--purple-dark);font-weight:600;font-size:12.5px;display:flex;align-items:center;justify-content:center;}
+.imp-sum{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;}
+.imp-chip{font-size:12px;padding:4px 10px;border-radius:999px;background:var(--bg-alt);color:var(--text2);border:1px solid var(--border);}
+.imp-chip.ok{background:var(--green-bg);color:var(--green);border-color:transparent;}
+.imp-chip.bad{background:var(--red-bg);color:var(--red);border-color:transparent;}
+.imp-chip.warn{background:var(--amber-bg);color:var(--amber);border-color:transparent;}
+.imp-scroll{max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:10px;-webkit-overflow-scrolling:touch;}
+.imp-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:560px;}
+.imp-table th{position:sticky;top:0;background:var(--bg-alt);text-align:left;font-weight:600;color:var(--text2);padding:8px 10px;border-bottom:1px solid var(--border);}
+.imp-table td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
+.imp-table tr.bad td{background:#FFF8F8;}
+.imp-ok{color:var(--green);font-weight:600;}
+.imp-err{color:var(--red);}
+.imp-warn{color:var(--amber);}
