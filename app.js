@@ -200,6 +200,7 @@ const state = {
   editingCustomer:false, editingActivation:false,
   editingRackName:false, rackNameError:null,
   addSiteError:null, addSiteForm:null,
+  importSiteId:null, importRows:null, importFileName:'', importError:null, importBusy:'',
   editSiteId:null, editSiteError:null,
   addRackSiteId:null, addRackError:null,
   addFloorSiteId:null, addFloorError:null,
@@ -1631,6 +1632,7 @@ function renderSite(site){
       <div style="display:flex;align-items:center;gap:10px;">
         ${isEngineer() ? `<button class="btn" data-add-rack="${site.id}">+ Add rack</button>` : ''}
         <button class="btn" id="exportExcelBtn" title="Download this category's sites as an Excel workbook">📥 Export Excel</button>
+        ${isEngineer() ? `<button class="btn" data-import-devices="${site.id}" title="Add many devices at once from an Excel sheet">📤 Import devices</button>` : ''}
         ${isEngineer() ? `<button class="btn btn-primary" data-add-device="${site.id}">+ Add device</button>` : ''}
         ${isAdmin() ? `<button class="btn btn-danger" data-remove-site="${site.id}" data-remove-site-name="${esc(site.name)}">Remove site</button>` : ''}
         ${gaugeSvg(site.utilizationPct,70)}
@@ -1979,6 +1981,317 @@ function renderAddDeviceModal(){
           <button type="submit" class="btn btn-primary">Add device</button>
         </div>
       </form>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------
+   IMPORT DEVICES FROM EXCEL
+   Template download -> upload -> preview with problems -> import
+--------------------------------------------------------------- */
+const IMPORT_MAX_ROWS = 2000;
+const IMPORT_LABELS = { rack:'Rack ID', model:'Model', sizeU:'Size (U)', startU:'Start U', serial:'Serial Number', person:'Authorized Person', kva:'Datasheet kVA' };
+const IMPORT_ALIASES = {
+  rack:   ['rackid','rack','rackname','rackno','racknumber'],
+  model:  ['model','devicemodel','device','devicetype','equipment'],
+  sizeU:  ['sizeu','size','usize','height','heightu','units'],
+  startU: ['startu','start','startposition','startingu','ustart','position','positionu'],
+  serial: ['serialnumber','serial','serialno','sn','serialnum'],
+  person: ['authorizedperson','authorisedperson','person','owner','responsible','authorized','contact'],
+  kva:    ['datasheetkva','kva','ratedkva','datasheet','datasheetconsumptionkva','consumptionkva','powerkva','datasheetconsumption'],
+};
+function normHeader(h){ return String(h==null?'':h).toLowerCase().replace(/\(.*?\)/g,'').replace(/[^a-z0-9]/g,''); }
+/* '' -> null (not filled), 'abc' -> NaN, '0,75' -> 0.75 */
+function importNum(v){
+  if(typeof v==='number') return v;
+  let t = String(v==null?'':v).trim().replace(/\s+/g,'');
+  if(t==='') return null;
+  if(/^\d+,\d+$/.test(t)) t = t.replace(',','.');
+  const n = Number(t);
+  return isFinite(n) ? n : NaN;
+}
+
+/* rows of cells -> device rows (pure function, no DOM) */
+function extractImportRows(aoa){
+  let hdrIdx = -1, colMap = null;
+  for(let i=0; i<Math.min(aoa.length, 15); i++){
+    const map = {};
+    (aoa[i]||[]).forEach((cell,ci)=>{
+      const n = normHeader(cell);
+      for(const [key,list] of Object.entries(IMPORT_ALIASES)){ if(map[key]===undefined && list.includes(n)) map[key] = ci; }
+    });
+    if(map.rack!==undefined && map.model!==undefined){ hdrIdx = i; colMap = map; break; }
+  }
+  if(hdrIdx<0) return { error:'Could not find the header row. Please use the template (it needs at least the "Rack ID" and "Model" columns).' };
+  const missing = ['rack','model','sizeU','serial','person','kva'].filter(k=>colMap[k]===undefined);
+  if(missing.length) return { error:`Missing column(s): ${missing.map(k=>IMPORT_LABELS[k]).join(', ')}. Please use the template.` };
+
+  const rows = [];
+  for(let i=hdrIdx+1; i<aoa.length; i++){
+    const r = aoa[i] || [];
+    const get = k => colMap[k]===undefined ? '' : r[colMap[k]];
+    const cells = ['rack','model','sizeU','startU','serial','person','kva'].map(k=>String(get(k)==null?'':get(k)).trim());
+    if(cells.every(c=>c==='')) continue;                       /* blank line */
+    rows.push({
+      rowNum: i+1,                                             /* the row number the user sees in Excel */
+      rack: cells[0], model: cells[1], sizeU: importNum(get('sizeU')), startU: importNum(get('startU')),
+      serial: cells[4], person: cells[5], kva: importNum(get('kva')),
+    });
+  }
+  return { rows };
+}
+
+/* checks every row against the site as it is now, in sheet order, and works out each device's U position */
+function validateImportRows(site, rows){
+  const rackByKey = new Map(site.racks.map(r=>[String(r.id).trim().toLowerCase(), r]));
+  const placedByRack = new Map();
+  const existingSerials = new Set();
+  site.racks.forEach(r=>r.devices.forEach(d=>{ if(d.serialNumber) existingSerials.add(String(d.serialNumber).trim().toLowerCase()); }));
+  const seenSerials = new Set();
+
+  return rows.map(row=>{
+    const errors = [], warnings = [];
+    let rack = null, startAssigned = null;
+    if(!row.rack) errors.push('Rack ID is empty');
+    else { rack = rackByKey.get(row.rack.toLowerCase()) || null; if(!rack) errors.push(`Rack "${row.rack}" was not found in ${site.name}`); }
+    if(!row.model) errors.push('Model is empty');
+    if(!row.serial) errors.push('Serial number is empty');
+    if(!row.person) errors.push('Authorized person is empty');
+    const sizeOk = typeof row.sizeU==='number' && Number.isInteger(row.sizeU) && row.sizeU>=1 && row.sizeU<=42;
+    if(!sizeOk) errors.push('Size (U) must be a whole number from 1 to 42');
+    if(!(typeof row.kva==='number' && isFinite(row.kva) && row.kva>0)) errors.push('Datasheet kVA must be a number greater than 0');
+    const wantsStart = row.startU!==null && row.startU!==undefined;
+    if(wantsStart && !(Number.isInteger(row.startU) && row.startU>=1 && row.startU<=42)) errors.push('Start U must be a whole number from 1 to 42');
+
+    if(rack && sizeOk && errors.length===0){
+      if(!placedByRack.has(rack.id)) placedByRack.set(rack.id, []);
+      const placed = placedByRack.get(rack.id);
+      const proxy = { devices: [
+        ...rack.devices.map(d=>({ id:d.id, startU:d.startU, sizeU:d.sizeU })),
+        ...placed.map((p,i)=>({ id:`import-${i}`, startU:p.startU, sizeU:p.sizeU })),
+      ]};
+      if(wantsStart){
+        const end = row.startU + row.sizeU - 1;
+        if(end>42) errors.push(`U${row.startU}-${end} goes past U42`);
+        else if(proxy.devices.some(d=> row.startU < d.startU + d.sizeU && row.startU + row.sizeU > d.startU)) errors.push(`U${row.startU}${row.sizeU>1?'-'+end:''} is already used in ${rack.id}`);
+        else startAssigned = row.startU;
+      } else {
+        const free = findFreeSlot(proxy, row.sizeU);
+        if(free===null) errors.push(`${rack.id} has no ${row.sizeU} contiguous U free`);
+        else startAssigned = free;
+      }
+      if(errors.length===0) placed.push({ startU:startAssigned, sizeU:row.sizeU });
+    }
+
+    if(row.serial){
+      const key = row.serial.toLowerCase();
+      if(existingSerials.has(key)) warnings.push('This serial number already exists in this site');
+      else if(seenSerials.has(key)) warnings.push('This serial number appears twice in the file');
+      seenSerials.add(key);
+    }
+    return { ...row, rackId: rack ? rack.id : row.rack, startAssigned, autoPlaced: !wantsStart, errors, warnings, ok: errors.length===0 };
+  });
+}
+
+/* writes the valid rows; in live mode it is all-or-nothing (inserted rows are removed again if a later batch fails) */
+async function importDevices(siteId, rows){
+  const site = SITES.find(s=>s.id===siteId);
+  const items = rows.map(r=>({ r, rack: site.racks.find(x=>x.id===r.rackId) }));
+  const created = new Map();                                    /* "rackKey|startU" -> new device id */
+  if(LIVE){
+    const records = items.map(({r,rack})=>({
+      rack_id: rack.uuid || rack.id, start_u: r.startAssigned, size_u: r.sizeU, model: r.model,
+      serial_number: r.serial, datasheet_kva: r.kva, authorized_person: r.person, created_by: state.user.id,
+    }));
+    const insertedIds = [];
+    for(let i=0; i<records.length; i+=200){
+      const { data, error } = await sb.from('devices').insert(records.slice(i,i+200)).select('id, rack_id, start_u');
+      if(error){
+        let clean = true;
+        if(insertedIds.length){
+          const del = await sb.from('devices').delete().in('id', insertedIds);
+          if(del.error){ clean = false; console.error('Import rollback failed:', del.error); }
+        }
+        return { error: clean ? `Import stopped (${error.message}). Nothing was added - please try again.`
+                              : `Import stopped (${error.message}). Some devices may already have been added - check the racks before trying again.` };
+      }
+      (data||[]).forEach(d=>{ insertedIds.push(d.id); created.set(`${d.rack_id}|${d.start_u}`, d.id); });
+    }
+  }
+  const touched = new Set();
+  items.forEach(({r,rack},i)=>{
+    const id = LIVE ? created.get(`${rack.uuid || rack.id}|${r.startAssigned}`) : `demo-${Date.now()}-${i}`;
+    rack.devices.push({ id, startU:r.startAssigned, sizeU:r.sizeU, model:r.model, serialNumber:r.serial, datasheetKva:r.kva, authorizedPerson:r.person });
+    if(!LIVE){
+      const uLabel = r.sizeU>1 ? `U${r.startAssigned}-${r.startAssigned+r.sizeU-1}` : `U${r.startAssigned}`;
+      pushDemoHistory(rack, 'device_added', `${r.model} (SN ${r.serial}) — rated ${r.kva.toFixed(2)} kVA (${uLabel}) — imported`);
+    }
+    touched.add(rack);
+  });
+  touched.forEach(recomputeRack);
+  recomputeSite(site);
+  return { ok:true, count: items.length };
+}
+
+async function downloadDeviceTemplate(site){
+  try{
+    const XLSX = await window.loadSheetJS();
+    const wb = XLSX.utils.book_new();
+
+    const headers = ['Rack ID','Model','Size (U)','Start U (optional)','Serial Number','Authorized Person','Datasheet kVA'];
+    const devices = XLSX.utils.aoa_to_sheet([headers]);
+    devices['!cols'] = [{wch:16},{wch:26},{wch:10},{wch:18},{wch:20},{wch:26},{wch:16}];
+    XLSX.utils.book_append_sheet(wb, devices, 'Devices');
+
+    const help = XLSX.utils.aoa_to_sheet([
+      ['How to fill the "Devices" sheet'],
+      [''],
+      ['One row per device. Keep the header row as it is. Empty rows are ignored (max ' + IMPORT_MAX_ROWS + ' rows).'],
+      [''],
+      ['Column','Required?','What to enter','Example'],
+      ['Rack ID','Yes','Exactly as shown on the "Rack IDs" sheet (upper/lower case does not matter)', site.racks[0] ? site.racks[0].id : 'A-01'],
+      ['Model','Yes','Device model or type','Rack Server 2U'],
+      ['Size (U)','Yes','Whole number, 1 to 42','2'],
+      ['Start U (optional)','No','Bottom U of the device. Leave empty to place it in the first free space in the rack. If filled, those U positions must be free.','10'],
+      ['Serial Number','Yes','Serial number of the device','SN-4F82K1'],
+      ['Authorized Person','Yes','Person or team responsible','A. Hassan — Network Ops'],
+      ['Datasheet kVA','Yes','Rated consumption from the datasheet, greater than 0','0.75'],
+      [''],
+      ['Rows with problems are shown before anything is saved. Only the correct rows are imported.'],
+    ]);
+    help['!cols'] = [{wch:22},{wch:11},{wch:80},{wch:26}];
+    XLSX.utils.book_append_sheet(wb, help, 'Instructions');
+
+    const racks = XLSX.utils.aoa_to_sheet([
+      ['Rack ID','Row','Free U','Customer'],
+      ...[...site.racks].sort((a,b)=>String(a.id||'').localeCompare(String(b.id||''), undefined, { numeric:true }))
+        .map(r=>[r.id, r.row||'', 42 - (r.occupiedU||0), r.customer||'']),
+    ]);
+    racks['!cols'] = [{wch:18},{wch:8},{wch:8},{wch:28}];
+    XLSX.utils.book_append_sheet(wb, racks, 'Rack IDs');
+
+    XLSX.writeFile(wb, `${site.id}-device-import-template.xlsx`);
+  } catch(err){
+    console.error(err);
+    showToast('Could not create the template - check your internet connection and try again.', true);
+  }
+}
+
+async function handleImportFile(e){
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  const site = SITES.find(s=>s.id===state.importSiteId);
+  state.importError = null; state.importRows = null; state.importFileName = file.name;
+  if(file.size > 5*1024*1024){ state.importError = 'This file is larger than 5 MB. Please split it into smaller files.'; renderModal(); return; }
+  state.importBusy = 'Reading file…'; renderModal();
+  try{
+    const XLSX = await window.loadSheetJS();
+    const wb = XLSX.read(await file.arrayBuffer(), { type:'array' });
+    const ws = wb.Sheets['Devices'] || wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
+    const ex = extractImportRows(aoa);
+    if(ex.error) state.importError = ex.error;
+    else if(ex.rows.length===0) state.importError = 'No device rows were found in the file.';
+    else if(ex.rows.length>IMPORT_MAX_ROWS) state.importError = `The file has ${ex.rows.length} rows. The limit is ${IMPORT_MAX_ROWS} per file.`;
+    else state.importRows = validateImportRows(site, ex.rows);
+  } catch(err){
+    console.error(err);
+    state.importError = 'Could not read this file. Please upload an .xlsx or .csv file (the template works best).';
+  }
+  state.importBusy = '';
+  renderModal();
+}
+
+async function handleImportConfirm(){
+  if(state.importBusy || !state.importRows) return;
+  const site = SITES.find(s=>s.id===state.importSiteId);
+  const okRows = state.importRows.filter(r=>r.ok);
+  if(!okRows.length) return;
+  const skipped = state.importRows.length - okRows.length;
+  state.importBusy = 'Importing…'; state.importError = null; renderModal();
+  let res;
+  try { res = await importDevices(site.id, okRows); }
+  catch(err){ console.error(err); res = { error: (err && err.message) ? err.message : 'Unexpected error during import.' }; }
+  state.importBusy = '';
+  if(res.error){ state.importError = res.error; renderModal(); return; }
+  closeModal();
+  showToast(`${res.count} device${res.count===1?'':'s'} imported into ${site.name}` + (skipped ? ` — ${skipped} row${skipped===1?'':'s'} skipped` : ''));
+  render();
+}
+
+function renderImportDevicesModal(){
+  const site = SITES.find(s=>s.id===state.importSiteId);
+  const rows = state.importRows;
+  const busy = state.importBusy;
+  const okN = rows ? rows.filter(r=>r.ok).length : 0;
+  const badN = rows ? rows.length - okN : 0;
+  const warnN = rows ? rows.filter(r=>r.ok && r.warnings.length).length : 0;
+  const SHOW = 300;
+
+  let body;
+  if(!rows){
+    body = `
+      <div class="imp-step"><span class="imp-num">1</span>
+        <div><b>Download the template</b>
+          <div class="faint" style="font-size:12px;margin:3px 0 8px;">An Excel file with the right columns. It also lists the rack IDs of ${esc(site.name)} and how to fill each column.</div>
+          <button class="btn btn-sm" id="importTplBtn" ${busy?'disabled':''}>📥 Download template</button>
+        </div>
+      </div>
+      <div class="imp-step"><span class="imp-num">2</span>
+        <div><b>Fill in the "Devices" sheet</b>
+          <div class="faint" style="font-size:12px;margin-top:3px;">One row per device. Leave "Start U" empty to place it in the first free space in the rack.</div>
+        </div>
+      </div>
+      <div class="imp-step"><span class="imp-num">3</span>
+        <div style="flex:1;min-width:0;"><b>Upload it</b>
+          <div class="faint" style="font-size:12px;margin:3px 0 8px;">.xlsx or .csv, up to ${IMPORT_MAX_ROWS} devices. You will see a preview before anything is saved.</div>
+          <input type="file" id="importFile" accept=".xlsx,.xls,.csv" ${busy?'disabled':''}/>
+          ${busy ? `<div class="faint" style="font-size:12px;margin-top:8px;">${esc(busy)}</div>` : ''}
+        </div>
+      </div>`;
+  } else {
+    const sorted = [...rows].sort((a,b)=> (a.ok===b.ok ? (b.warnings.length>0)-(a.warnings.length>0) : (a.ok?1:-1)) || a.rowNum-b.rowNum);
+    body = `
+      <div class="imp-sum">
+        <span class="imp-chip">${rows.length} row${rows.length===1?'':'s'} read</span>
+        <span class="imp-chip ok">${okN} ready</span>
+        ${badN ? `<span class="imp-chip bad">${badN} with problems — will be skipped</span>` : ''}
+        ${warnN ? `<span class="imp-chip warn">${warnN} warning${warnN===1?'':'s'}</span>` : ''}
+      </div>
+      <div class="faint" style="font-size:12px;margin-bottom:8px;">${esc(state.importFileName)}${rows.length>SHOW?` — showing the first ${SHOW} (problems first)`:' — problems first'}</div>
+      <div class="imp-scroll">
+        <table class="imp-table">
+          <thead><tr><th>Row</th><th>Rack</th><th>Model</th><th>Position</th><th>Result</th></tr></thead>
+          <tbody>
+            ${sorted.slice(0,SHOW).map(r=>{
+              const pos = r.ok ? `U${r.startAssigned}${r.sizeU>1?'–'+(r.startAssigned+r.sizeU-1):''}${r.autoPlaced?' (auto)':''}` : '—';
+              const msg = r.ok
+                ? `<span class="imp-ok">Ready</span>${r.warnings.map(w=>`<div class="imp-warn">⚠ ${esc(w)}</div>`).join('')}`
+                : r.errors.map(x=>`<div class="imp-err">✕ ${esc(x)}</div>`).join('');
+              return `<tr class="${r.ok?'':'bad'}"><td>${r.rowNum}</td><td>${esc(r.rackId||'')}</td><td>${esc(r.model||'')}</td><td>${pos}</td><td>${msg}</td></tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:760px;">
+      <div class="modal-top">
+        <div>
+          <div class="sitename" style="font-size:18px;">Import devices from Excel</div>
+          <div class="siteloc" style="margin-top:2px;">Add many devices to ${esc(site.name)} at once</div>
+        </div>
+        <button class="modal-close" id="closeModal">&times;</button>
+      </div>
+      ${state.importError ? `<div class="form-error">${esc(state.importError)}</div>` : ''}
+      ${body}
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;flex-wrap:wrap;">
+        ${rows ? `<button class="btn" id="importAgain" ${busy?'disabled':''}>Choose another file</button>` : ''}
+        <button class="btn" id="importCancel" ${busy?'disabled':''}>Cancel</button>
+        ${rows ? `<button class="btn btn-primary" id="importConfirm" ${(busy||okN===0)?'disabled':''}>${busy ? esc(busy) : `Import ${okN} device${okN===1?'':'s'}`}</button>` : ''}
+      </div>
     </div>
   </div>`;
 }
@@ -2876,6 +3189,19 @@ function renderModal(){
     return;
   }
 
+  if(state.modalType==='importDevices'){
+    modalRoot.innerHTML = renderImportDevicesModal();
+    bindOverlayClose();
+    const site = SITES.find(s=>s.id===state.importSiteId);
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    const cancel = document.getElementById('importCancel'); if(cancel) cancel.addEventListener('click', closeModal);
+    const tpl = document.getElementById('importTplBtn'); if(tpl) tpl.addEventListener('click', ()=>downloadDeviceTemplate(site));
+    const file = document.getElementById('importFile'); if(file) file.addEventListener('change', handleImportFile);
+    const again = document.getElementById('importAgain'); if(again) again.addEventListener('click', ()=>{ state.importRows=null; state.importFileName=''; state.importError=null; renderModal(); });
+    const go = document.getElementById('importConfirm'); if(go) go.addEventListener('click', handleImportConfirm);
+    return;
+  }
+
   if(state.modalType==='addSite'){
     modalRoot.innerHTML = renderAddSiteModal();
     bindOverlayClose();
@@ -2932,6 +3258,7 @@ function closeModal(){
   state.modalRack=null; state.modalSiteId=null; state.rackFace='front';
   state.modalType=null; state.addDeviceSiteId=null; state.addDeviceRackId=null; state.addDeviceError=null;
   state.editingCapacity=false; state.capacityError=null; state.addSiteError=null; state.addSiteForm=null;
+  state.importSiteId=null; state.importRows=null; state.importFileName=''; state.importError=null; state.importBusy='';
   state.editingActual=false; state.actualError=null; state.editingBreaker=false;
   state.editingCustomer=false; state.editingActivation=false;
   state.editingRackName=false; state.rackNameError=null;
@@ -3241,6 +3568,15 @@ function attachHandlers(){
       state.addDeviceRackId = null;
       state.addDeviceError = null;
       state.modalType = 'addDevice';
+      renderModal();
+    });
+  });
+  rootEl.querySelectorAll('[data-import-devices]').forEach(el=>{
+    el.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      state.importSiteId = el.getAttribute('data-import-devices');
+      state.importRows = null; state.importFileName = ''; state.importError = null; state.importBusy = '';
+      state.modalType = 'importDevices';
       renderModal();
     });
   });
