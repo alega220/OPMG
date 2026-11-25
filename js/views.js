@@ -364,3 +364,25 @@ function drawAnalysisCharts() {
   const mm = Array.from(mix.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
   charts.push(new Chart($('#chMix'), { type: 'doughnut', data: { labels: mm.map(x => x[0]), datasets: [{ data: mm.map(x => x[1]), backgroundColor: CAGE_COLORS, borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '62%', plugins: { legend: { position: 'right', labels: { boxWidth: 10, usePointStyle: true } } } } }));
 }
+
+
+/* ---------- category picker (entry) ---------- */
+function renderCategoryPicker() {
+     const counts = { all: SITES.length };
+     Object.keys(CATEGORIES).forEach(k => counts[k] = SITES.filter(s => (s.category || 'colo') === k).length);
+     return `<div class="catpick">
+         <div class="logo big"><i></i><i></i><i></i></div>
+             <h1>Choose a category</h1>
+                 <p class="muted">Pick which set of sites you want to work with. You can switch anytime from the sidebar.</p>
+                     <div class="catpick-grid">
+                           ${Object.entries(CATEGORIES).map(([k, c]) => `
+                                 <button class="catpick-card" data-act="pick-cat" data-v="${k}">
+                                         <div class="cp-i">${c.icon}</div>
+                                                 <div class="cp-t">${esc(c.label)} sites</div>
+                                                         <div class="cp-c">${counts[k]} site${counts[k] === 1 ? '' : 's'}</div>
+                                                                 <div class="cp-d">${esc(c.desc)}</div>
+                                                                       </button>`).join('')}
+                                                                           </div>
+                                                                               <button class="catpick-all" data-act="pick-cat" data-v="all">View all ${counts.all} sites</button>
+                                                                               </div>`;
+}
