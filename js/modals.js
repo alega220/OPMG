@@ -62,13 +62,13 @@ function openRack(key) {
     <div>${elevationHtml(site, rack, can)}</div>
     <div class="rack-side">
       <div class="statgrid">
-        <div class="stat wide"><div class="stat-l">Power</div><div class="stat-v">${rack.actualKva.toFixed(2)} <small>/ ${rack.capacityKva.toFixed(1)} kVA</small> <span class="badge ${statusKey(pct)}">${fmtPct(pct)}</span></div>${bar(pct, 8)}</div>
+        <div class="stat wide"><div class="stat-l">Power ${specEd}</div><div class="stat-v">${rack.actualKva.toFixed(2)} <small>/ ${rack.capacityKva.toFixed(1)} kVA</small> <span class="badge ${statusKey(pct)}">${fmtPct(pct)}</span></div>${bar(pct, 8)}</div>
         <div class="stat"><div class="stat-l">Space</div><div class="stat-v">${rack.occupiedU}<small>/42 U</small></div></div>
         <div class="stat"><div class="stat-l">Rated (datasheet)</div><div class="stat-v">${rack.totalDatasheetKva.toFixed(2)}<small> kVA</small></div></div>
-        <div class="stat"><div class="stat-l">Customer</div><div class="stat-v sm">${esc(customerName(rack) || '—')}</div></div>
-        <div class="stat"><div class="stat-l">Cage</div><div class="stat-v sm">${cg ? `<a href="#" data-act="cage" data-id="${esc(cg.id)}" style="color:${esc(cg.color)}">${esc(cg.name)}</a>` : '—'}</div></div>
-        <div class="stat"><div class="stat-l">Breaker</div><div class="stat-v sm mono">${esc(rack.circuitBreaker || '—')}</div></div>
-        <div class="stat"><div class="stat-l">Activation</div><div class="stat-v sm">${esc(rack.activationDate || '—')}</div></div>
+        <div class="stat"><div class="stat-l">Customer ${specEd}</div><div class="stat-v sm">${esc(customerName(rack) || '—')}</div></div>
+        <div class="stat"><div class="stat-l">Cage ${specEd}</div><div class="stat-v sm">${cg ? `<a href="#" data-act="cage" data-id="${esc(cg.id)}" style="color:${esc(cg.color)}">${esc(cg.name)}</a>` : '—'}</div></div>
+        <div class="stat"><div class="stat-l">Breaker ${specEd}</div><div class="stat-v sm mono">${esc(rack.circuitBreaker || '—')}</div></div>
+        <div class="stat"><div class="stat-l">Activation ${specEd}</div><div class="stat-v sm">${esc(rack.activationDate || '—')}</div></div>
       </div>
       <div class="sec-h"><h3>Devices <em>${rack.devices.length}</em></h3>${can ? `<button class="btn sm primary" data-act="add-device">${ico('plus')} Add device</button>` : ''}</div>
       <div class="scroll" style="max-height:340px"><table class="tbl dense"><thead><tr><th>U</th><th>Device</th><th class="n">kVA</th><th>Authorized</th>${can ? '<th></th>' : ''}</tr></thead><tbody>${devRows || `<tr><td colspan="5" class="center pad faint">Empty rack</td></tr>`}</tbody></table></div>
