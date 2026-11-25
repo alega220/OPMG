@@ -76,6 +76,7 @@ const ACTIONS = {
   signout: () => signOut(),
   users: () => openUsers(),
   cat: t => { state.category = t.dataset.v; localStorage.setItem('opmg.category', state.category); renderAll(); },
+   'pick-cat': t => { state.category = t.dataset.v; state.categoryPicked = true; localStorage.setItem('opmg.category', state.category); renderAll(); },
   theme: () => { state.theme = state.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('opmg.theme', state.theme); renderAll(); },
   'close-modal': () => closeModal(),
   'add-site': () => addSiteForm(),
