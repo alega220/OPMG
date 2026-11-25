@@ -53,6 +53,7 @@ const state = {
   authMode: 'signin', authError: null,
   cagesEnabled: true,
   category: localStorage.getItem('opmg.category') || 'all',
+   categoryPicked: false,   /* entry category picker shows until a choice is made (per session) */
   theme: localStorage.getItem('opmg.theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
   /* floor-plan view prefs (per session) */
   fp: { floor: 'all', group: 'rows', colorBy: 'power', size: 'md', search: '', status: 'all', select: false, selected: new Set() },
@@ -516,7 +517,7 @@ async function initAuth() {
   if (!LIVE) { state.user = { id: 'demo', email: 'demo@opmg.local' }; state.role = 'admin'; state.approved = true; await loadData(); return; }
   const { data: { session } } = await sb.auth.getSession();
   if (session) await onSignedIn(session.user); else state.ready = true;
-  sb.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT') { state.user = null; state.role = null; state.approved = false; SITES = []; reindex(); location.hash = '#/'; renderAll(); } });
+  sb.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT') { state.user = null; state.role = null; state.approved = false; state.categoryPicked = false; SITES = []; reindex(); location.hash = '#/'; renderAll(); } });
 }
 async function onSignedIn(user) {
   state.user = user;
