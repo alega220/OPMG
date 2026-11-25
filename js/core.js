@@ -379,6 +379,8 @@ async function placeRack(site, rack, { row, floorId, index, cageId = null }) {
 
 /* ----- sites / floors ----- */
 const slugBase = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 12);
+/* DB constraint sites_type_check allows 'colocation'/'inhouse'; the app uses 'colo'/'inhouse'. Map on writes to the legacy type column. */
+const siteTypeFor = c => c === 'colo' ? 'colocation' : c;
 async function createSite({ name, location, tier, pue, rackCount, rowCount, capacityKva, category, code }) {
   const base = slugBase(code) || slugBase(name);
   if (!base) return { error: 'Enter a site code using English letters or numbers (used in rack names).' };
@@ -386,7 +388,7 @@ async function createSite({ name, location, tier, pue, rackCount, rowCount, capa
   const per = Math.max(1, Math.ceil(rackCount / rowCount));
   let floorId = id + '-f1';
   if (LIVE) {
-    const { error } = await sb.from('sites').insert({ id, name, location, tier, pue, category, type: category });
+    const { error } = await sb.from('sites').insert({ id, name, location, tier, pue, category, type: siteTypeFor(category) });
     if (error) return { error: error.message };
     const fl = await sb.from('floors').insert({ site_id: id, name: 'Floor 1', position: 1 }).select().single();
     if (fl.error) { await sb.from('sites').delete().eq('id', id); return { error: fl.error.message }; }
@@ -439,7 +441,7 @@ async function updateSiteField(site, key, raw) {
     else { v = f.int ? parseInt(raw, 10) : parseFloat(raw); if (isNaN(v) || v < (f.min ?? -Infinity)) return { error: `${f.label} must be a number ≥ ${f.min ?? 0}.` }; }
   } else if (f.type === 'text') { v = String(raw).trim(); if (f.req && !v) return { error: `${f.label} is required.` }; }
   else if (f.type === 'date') v = raw || null;
-  const patch = { [f.col]: v }; if (key === 'category') patch.type = v;
+  const patch = { [f.col]: v }; if (key === 'category') patch.type = siteTypeFor(v);
   if (LIVE) { const { error } = await sb.from('sites').update(patch).eq('id', site.id); if (error) return { error: error.message }; }
   site[key] = v == null && f.type === 'date' ? '' : v; recomputeSite(site); return { ok: true };
 }
