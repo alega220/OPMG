@@ -18,6 +18,7 @@ function renderAll() {
   if (!state.ready) { app.innerHTML = `<div class="boot"><div class="logo big"><i></i><i></i><i></i></div><p>Loading…</p></div>`; return; }
   if (LIVE && !state.user) { app.innerHTML = renderLogin(); wireAuth(); return; }
   if (LIVE && !state.approved) { app.innerHTML = renderPending(); return; }
+   if (!state.categoryPicked) { app.innerHTML = renderCategoryPicker(); window.scrollTo(0, 0); return; }
   app.innerHTML = renderShell();
   if (state.route.name === 'analysis') drawAnalysisCharts();
   wireSearch();
