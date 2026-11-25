@@ -245,3 +245,38 @@ label.btn input{display:none}
 
 .cage-layout{display:flex;flex-direction:column;gap:10px;border:2px dashed var(--cc);border-radius:14px;padding:12px;background:color-mix(in srgb,var(--cc) 7%,transparent)}
 .cl-row{display:flex;gap:12px;align-items:flex-start}.cl-l{width:54px;flex:none;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--text2);font-weight:700;padding-top:8px}
+
+
+/* category picker (entry) */
+.catpick{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px 24px}
+.catpick .logo.big{margin-bottom:18px}
+.catpick p{margin:8px 0 28px}
+.catpick-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;width:100%;max-width:680px}
+@media (max-width:640px){.catpick-grid{grid-template-columns:1fr}}
+.catpick-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:26px 22px;text-align:left;box-shadow:var(--shadow);transition:transform .12s,box-shadow .12s,border-color .12s}
+.catpick-card:hover{transform:translateY(-2px);border-color:var(--accent);box-shadow:0 12px 32px rgba(15,23,42,.12)}
+.cp-i{font-size:30px;line-height:1;margin-bottom:12px}
+.cp-t{font-size:17px;font-weight:700;margin-bottom:4px;color:var(--text)}
+.cp-c{font-size:11.5px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.cp-d{font-size:13px;color:var(--text3);line-height:1.5}
+.catpick-all{margin-top:22px;background:none;border:none;color:var(--accent);font-weight:600;font-size:13.5px}
+.catpick-all:hover{text-decoration:underline}
+.stat-l .spec-ed{width:18px;height:18px;vertical-align:-3px;margin-left:2px;opacity:.55}
+.stat-l .spec-ed:hover{opacity:1;color:var(--accent)}
+
+
+/* modern form dialogs (add site / rack / device) */
+.overlay{backdrop-filter:blur(10px) saturate(1.2);background:rgba(8,12,28,.62)}
+.modal{border:1px solid color-mix(in srgb,var(--accent) 18%,var(--line));box-shadow:0 24px 70px rgba(8,12,28,.35);animation:pop .22s cubic-bezier(.2,.9,.25,1.15)}
+.modal-h{padding:22px 26px 14px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,transparent),transparent)}
+.modal-h h2{font-size:21px;letter-spacing:-.02em}
+.modal-b{padding:16px 26px 22px}
+.fgrid{gap:16px}
+.f{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase}
+.f input,.f select,.f textarea{background:var(--surface2);border:1.5px solid var(--line2);border-radius:12px;padding:10px 12px;text-transform:none;letter-spacing:0;transition:border-color .15s,box-shadow .15s,background .15s}
+.f input:hover,.f select:hover,.f textarea:hover{border-color:var(--text3)}
+.f input:focus,.f select:focus,.f textarea:focus{background:var(--surface);border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 18%,transparent)}
+.f small{text-transform:none;letter-spacing:0;font-size:12px}
+.modal-f{padding:16px 26px}
+.modal-f .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;padding:10px 20px;border-radius:12px;box-shadow:0 6px 18px color-mix(in srgb,var(--accent2) 45%,transparent)}
+.modal-f .btn.primary:hover{transform:translateY(-1px);background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 10px 24px color-mix(in srgb,var(--accent2) 55%,transparent)}
