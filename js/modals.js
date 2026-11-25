@@ -54,6 +54,7 @@ function openRack(key) {
   const e = RACK_INDEX.get(key); if (!e) return;
   const { rack, site } = e; state.modalRack = key;
   const can = isManager();
+   const specEd = can ? `<button class="iconbtn sm spec-ed" data-act="edit-rack" title="Edit rack specs">${ico('edit')}</button>` : '';
   const cg = rack.cageId && site.cages.find(c => c.id === rack.cageId);
   const pct = rack.utilPct;
   const devRows = rack.devices.slice().sort((a, b) => b.startU - a.startU).map(d => `<tr><td><span class="ubadge">U${d.startU}${d.sizeU > 1 ? '–' + (d.startU + d.sizeU - 1) : ''}</span></td><td><b>${esc(d.model)}</b><div class="faint sm mono">${esc(d.serialNumber || '—')}</div></td><td class="n">${d.datasheetKva.toFixed(2)}</td><td><span class="av sm">${esc(initials(d.authorizedPerson))}</span> ${esc(String(d.authorizedPerson).replace(/—.*$/, '').trim())}</td>${can ? `<td class="act"><button class="iconbtn sm" data-act="edit-device" data-id="${esc(d.id)}">${ico('edit')}</button><button class="iconbtn sm" data-act="rm-device" data-id="${esc(d.id)}">${ico('x')}</button></td>` : ''}</tr>`).join('');
