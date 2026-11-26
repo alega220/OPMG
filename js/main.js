@@ -81,6 +81,7 @@ const ACTIONS = {
   'close-modal': () => closeModal(),
   'add-site': () => addSiteForm(),
   'print-site': () => printSitePdf(routeSite()),
+  'print-portfolio': () => printPortfolioPdf(),
   'export-site': () => exportSiteExcel(routeSite()).catch(e => toast(e.message, true)),
   'import-devices': () => importModal(routeSite()),
   'add-rack': () => addRackForm(routeSite()),
