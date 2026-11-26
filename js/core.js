@@ -78,7 +78,8 @@ function recomputeRack(r) {
 }
 function recomputeSite(site) {
   site.racks.forEach(recomputeRack);
-  site.itLoadKva = site.racks.reduce((s, r) => s + (r.actualKva || 0), 0);
+  site.rackSumKva = site.racks.reduce((s, r) => s + (r.actualKva || 0), 0);
+  site.itLoadKva = site.manualLoadKva != null ? site.manualLoadKva : site.rackSumKva;
   site.utilityLoadKva = site.itLoadKva * (site.pue || 1);
   site.totalCapacityKva = site.racks.reduce((s, r) => s + r.capacityKva, 0);
   site.utilizationPct = site.totalCapacityKva > 0 ? site.itLoadKva / site.totalCapacityKva : 0;
@@ -234,6 +235,7 @@ async function loadData() {
     const site = {
       id: row.id, name: row.name, location: row.location, tier: row.tier, pue: Number(row.pue), category: row.category || 'colo',
       commissionedDate: row.commissioned_date || '',
+      manualLoadKva: row.actual_load_kva != null ? Number(row.actual_load_kva) : null,
       hvacUnits: row.hvac_units != null ? Number(row.hvac_units) : null, hvacTrPerUnit: row.hvac_tr_per_unit != null ? Number(row.hvac_tr_per_unit) : null,
       upsUnits: row.ups_units != null ? Number(row.ups_units) : null, upsKvaPerUnit: row.ups_kva_per_unit != null ? Number(row.ups_kva_per_unit) : null,
       generatorUnits: row.generator_units != null ? Number(row.generator_units) : null, generatorKvaPerUnit: row.generator_kva_per_unit != null ? Number(row.generator_kva_per_unit) : null,
@@ -425,6 +427,7 @@ const SPEC_FIELDS = {
   tier: { col: 'tier', label: 'Tier', type: 'select', options: ['Tier I', 'Tier II', 'Tier III', 'Tier IV'] },
   pue: { col: 'pue', label: 'PUE', type: 'number', min: 1, step: 0.01, req: true },
   category: { col: 'category', label: 'Category', type: 'select', options: ['colo', 'inhouse'] },
+  manualLoadKva: { col: 'actual_load_kva', label: 'Actual IT load (kVA)', type: 'number', min: 0, step: 0.01 },
   commissionedDate: { col: 'commissioned_date', label: 'Commissioned', type: 'date' },
   hvacUnits: { col: 'hvac_units', label: 'HVAC units', type: 'number', min: 0, step: 1, int: true },
   hvacTrPerUnit: { col: 'hvac_tr_per_unit', label: 'HVAC TR per unit', type: 'number', min: 0, step: 0.1 },
@@ -442,7 +445,7 @@ async function updateSiteField(site, key, raw) {
   } else if (f.type === 'text') { v = String(raw).trim(); if (f.req && !v) return { error: `${f.label} is required.` }; }
   else if (f.type === 'date') v = raw || null;
   const patch = { [f.col]: v }; if (key === 'category') patch.type = siteTypeFor(v);
-  if (LIVE) { const { error } = await sb.from('sites').update(patch).eq('id', site.id); if (error) return { error: error.message }; }
+  if (LIVE) { const { error } = await sb.from('sites').update(patch).eq('id', site.id); if (error) return { error: key === 'manualLoadKva' && /actual_load_kva/.test(error.message) ? 'The database needs the actual_load_kva column first (run migration_site_load.sql in Supabase).' : error.message }; }
   site[key] = v == null && f.type === 'date' ? '' : v; recomputeSite(site); return { ok: true };
 }
 
